@@ -1,0 +1,5 @@
+To convert foo.mp3 and  foo.cdg into a video:
+
+rm -rf tmpdir; mkdir tmpdir
+cargo run --release --example frame_dumper foo.cdg tmpdir
+fmpeg -r 25 -i tmpdir/frame_%05d.png -i foo.mp3 foo.mp4

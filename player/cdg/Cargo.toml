@@ -3,4 +3,10 @@ name = "cdg"
 version = "0.1.0"
 authors = ["TQ Hirsch <thequux@thequux.com>"]
 
+description = "CD+G parser"
+repository = "https://github.com/thequux/qaraoke"
+license = "ISC"
+
+keywords = ["cdg", "cd+g", "karaoke"]
+
 [dependencies]

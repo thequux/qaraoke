@@ -16,7 +16,7 @@ fn main() {
 
     let mut frame_no = 0;
     let mut sector_no = 0;
-    let mut res_image = image::RgbaImage::new(512,256);
+    let mut res_image = image::RgbaImage::new(300,216);
     let mut interp = cdg_renderer::CdgInterpreter::new();
     
     while let Some(sector) = scsi.next() {
