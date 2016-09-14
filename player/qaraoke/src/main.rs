@@ -3,6 +3,7 @@ extern crate cdg_renderer;
 #[macro_use]
 extern crate glium;
 extern crate image;
+extern crate fps_counter;
 
 // TODO: Add glium_pib for bare metal Raspberry Pi support
 
@@ -58,29 +59,40 @@ fn main() {
     let program = glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None).unwrap();
 
     use std::io::Cursor;
-    let image = image::load(Cursor::new(&include_bytes!("../../../local/outdir/frame_00086.png")[..]),
-                            image::PNG).unwrap().to_rgba();
-    let image_dimensions = image.dimensions();
-    let image = glium::texture::RawImage2d::from_raw_rgba_reversed(image.into_raw(), image_dimensions);
-    let texture = glium::texture::Texture2d::new(&display, image).unwrap();
-    let uniforms = uniform!{
-        tex: texture.sampled().magnify_filter(glium::uniforms::MagnifySamplerFilter::Nearest)
-            .minify_filter(glium::uniforms::MinifySamplerFilter::Nearest),
-    };
+
+    let mut interp = cdg_renderer::CdgInterpreter::new();
+    let mut frame_count = 0;
+    let mut fps = fps_counter::FPSCounter::new();
     loop {
         use glium::Surface;
+        use image::GenericImage;
         let mut target = display.draw();
         target.clear_color(0.0, 0.0, 1.0, 1.0);
+
+        let mut image = image::RgbaImage::new(300,216);
+        image.copy_from(&interp, 0,0);
+        
+        let glimage = glium::texture::RawImage2d::from_raw_rgba_reversed(image.into_raw(), (300,216));
+        let texture = glium::texture::Texture2d::new(&display, glimage).unwrap();
+        let uniforms = uniform!{
+            tex: texture.sampled().magnify_filter(glium::uniforms::MagnifySamplerFilter::Nearest),
+        };
         target.draw(&vertex_buffer, &indices, &program, &uniforms, &Default::default()).unwrap();
         target.finish().unwrap();
-
-        
+   
         for ev in display.poll_events() {
             match ev {
                 glium::glutin::Event::Closed => return,
                 _ => (),
             }
         }
+        frame_count += 1;
+        let fps_c = fps.tick();
+        if frame_count % 100 == 0 {
+            display.get_window().map(|win| win.set_title(&format!("{} fps", fps_c)));
+        }
     }
     println!("Hello, world!");
 }
+
+
