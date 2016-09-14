@@ -1,0 +1,11 @@
+[package]
+name = "qaraoke"
+version = "0.1.0"
+authors = ["TQ Hirsch <thequux@thequux.com>"]
+
+[dependencies]
+cdg = "0.1"
+cdg_renderer = "0.1"
+glium = "0.15"
+clap = "2.12"
+image = "0.10"
