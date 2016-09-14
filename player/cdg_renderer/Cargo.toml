@@ -10,6 +10,6 @@ keywords = ["cdg", "karaoke"]
 
 
 [dependencies]
-cdg = { path = "../cdg" }
+cdg = { path = "../cdg", version= "0.1" }
 image = "0.10"
 
