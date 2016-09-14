@@ -6,7 +6,7 @@ description = "CD+G renderer"
 repository = "https://github.com/thequux/qaraoke"
 license = "ISC"
 
-keywords = ["cdg", "cd+g", "karaoke"]
+keywords = ["cdg", "karaoke"]
 
 
 [dependencies]
