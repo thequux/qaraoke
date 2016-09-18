@@ -36,7 +36,6 @@ impl <R: Read> Mp3Stream<R> {
                 if self.buffer[i] == 0xFF && self.buffer[i+1] & 0xE6 == 0xE2 {
                     frame_found = true;
                     if i != 0 {
-                        println!("Skipping {} bytes", i);
                         self.buffer.consume(i);
                     }
                     if self.buffer.len() < 4 {
@@ -47,7 +46,6 @@ impl <R: Read> Mp3Stream<R> {
             }
             if !frame_found {
                 let len = self.buffer.len();
-                println!("Skipping {} bytes", len);
                 self.buffer.consume(len);
                 continue;
             }

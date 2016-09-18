@@ -1,0 +1,14 @@
+[package]
+authors = ["TQ Hirsch <thequux@thequux.com>"]
+name = "ogk-tool"
+version = "0.1.0"
+
+[dependencies]
+clap = "2.13.0"
+
+[dependencies.ogk]
+path = "../ogk"
+
+[[bin]]
+name = "ogk"
+path = "src/main.rs"
