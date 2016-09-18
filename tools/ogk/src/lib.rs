@@ -1,7 +1,12 @@
 //#![feature(collections)]
+#[macro_use] extern crate bitflags;
+#[macro_use] extern crate lazy_static;
 extern crate byteorder;
 extern crate lz4;
 extern crate cdg as cdg_parser;
+extern crate ogg_sys;
+extern crate crc;
+extern crate rand;
 
 pub mod mp3;
 pub mod util;

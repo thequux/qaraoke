@@ -175,28 +175,12 @@ pub fn max_fsize() -> usize {
     maxsize
 }
 
-
-pub struct Frame {
-    pub content: Vec<u8>,
-    pub timestamp: u64,
-}
-
-impl ogg::BitstreamFrame for Frame {
-    fn content(&self) -> &[u8] {
-        &self.content
-    }
-
-    fn timestamp(&self) -> u64 {
-        self.timestamp
-    }
-}
-
 // OggMP3 encoder
 pub struct OggMP3Coder<R> {
     /// A reader that produces MP3 frames
     stream: Mp3Stream<R>,
     // Only Some until the first data frame has been produced
-    first_frame: Option<Frame>,
+    first_frame: Option<ogg::Packet>,
     pseudoheader: [u8;4],
     samples_per_frame: u32,
     sample_frequency: u32,
@@ -206,7 +190,7 @@ pub struct OggMP3Coder<R> {
 impl <R: Read> OggMP3Coder<R> {
     pub fn new(reader: R) -> io::Result<Self> {
         let mut stream = Mp3Stream::new(reader);
-        let first_frame = try!(stream.next_frame()).map(|frame| Frame{
+        let first_frame = try!(stream.next_frame()).map(|frame| ogg::Packet{
             content: frame.to_owned(),
             timestamp: 0,
         });
@@ -235,8 +219,6 @@ impl <R: Read> OggMP3Coder<R> {
 }
 
 impl <R: Read> ogg::BitstreamCoder for OggMP3Coder<R> {
-    type Frame = Frame;
-    type Error = io::Error;
     fn headers(&self) -> Vec<Vec<u8>> {
         use byteorder::{LittleEndian,WriteBytesExt};
         let mut header = Vec::with_capacity(24);
@@ -253,7 +235,7 @@ impl <R: Read> ogg::BitstreamCoder for OggMP3Coder<R> {
         vec![header]
     }
 
-    fn next_frame(&mut self) -> io::Result<Option<Frame>> {
+    fn next_frame(&mut self) -> io::Result<Option<ogg::Packet>> {
         if self.last_sample_no == 0 {
             self.last_sample_no = self.samples_per_frame as u64;
             return Ok(self.first_frame.take().map(|mut frame| {frame.timestamp = self.last_sample_no; frame}));
@@ -261,12 +243,16 @@ impl <R: Read> ogg::BitstreamCoder for OggMP3Coder<R> {
             self.last_sample_no += self.samples_per_frame as u64;
             let next_frame = self.last_sample_no;
             self.stream.next_frame().map( |r| r.map(|frame| {
-                Frame{
+                ogg::Packet{
                     content: frame.to_owned(),
                     timestamp: next_frame,
                 }
             }))
         }
+    }
+
+    fn map_granule(&self, timestamp: u64) -> u64 {
+        return timestamp * 1000_000 / self.sample_frequency as u64;
     }
 }
 

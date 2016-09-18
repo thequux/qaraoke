@@ -4,21 +4,6 @@ use std::io;
 use lz4;
 use ogg;
 
-pub struct Frame {
-    content: Vec<u8>,
-    timestamp: u64,
-}
-
-impl ogg::BitstreamFrame for Frame {
-    fn content(&self) -> &[u8] {
-        &self.content
-    }
-
-    fn timestamp(&self) -> u64 {
-        self.timestamp
-    }
-}
-
 pub struct OggCdgCoder<R> {
     reader: R,
     packetsize: u8,
@@ -39,8 +24,8 @@ impl <R: Read> OggCdgCoder<R> {
 }
 
 impl <R: Read> ogg::BitstreamCoder for OggCdgCoder<R> {
-    type Frame = Frame;
-    type Error = io::Error;
+    //type Frame = Frame;
+    //type Error = io::Error;
     
     fn headers(&self) -> Vec<Vec<u8>> {
         let mut header = Vec::with_capacity(14);
@@ -53,7 +38,7 @@ impl <R: Read> ogg::BitstreamCoder for OggCdgCoder<R> {
         return vec![header];
     }
 
-    fn next_frame(&mut self) -> io::Result<Option<Frame>> {
+    fn next_frame(&mut self) -> io::Result<Option<ogg::Packet>> {
         let mut input = Vec::with_capacity(self.packetsize as usize * 96);
         let mut output = Vec::new();
         let size = try!(self.reader.by_ref().take(self.packetsize as u64 * 96).read_to_end(&mut input));
@@ -80,9 +65,13 @@ impl <R: Read> ogg::BitstreamCoder for OggCdgCoder<R> {
         
         self.cur_frame += size as u64 / 96;
 
-        return Ok(Some(Frame{
+        return Ok(Some(ogg::Packet{
             content: output,
             timestamp: self.cur_frame << 32 | self.last_keyframe,
         }));
+    }
+
+    fn map_granule(&self, granule: u64) -> u64 {
+        return (granule >> 32) * 1000_000 / 75;
     }
 }
