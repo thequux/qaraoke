@@ -12,7 +12,7 @@ fn main() {
     let destdir = args.next().expect("Usage: $0 filename destdir");
 
     let infile = File::open(filename).unwrap();
-    let mut scsi = cdg::SubchannelStreamIter::new(infile);
+    let mut scsi = cdg::SubchannelStreamIter::new(std::io::BufReader::with_capacity(16384, infile));
 
     let mut frame_no = 0;
     let mut sector_no = 0;
