@@ -31,6 +31,8 @@ pub struct Tile {
     /// 0 is the top row. Within each byte/row, bit 5 (0x20) is the
     /// leftmost pixel and bit 0 (0x01) is the rightmost.
     pub content: [u8;12], // LSB is rightmost pixel; byte 0 is top
+    /// The channel to display this tile on.
+    pub channel: u8,
 }
 
 impl Tile {
@@ -48,6 +50,10 @@ impl Tile {
             pos: (data[3] & 0x3F, data[2] & 0x1F),
             color: (data[0] & 0x0F, data[1] & 0x0F), 
             content: content,
+            // This channel interpretation is from CDGFix. I don't
+            // have access to the real specs, so I don't know if it's
+            // accurate.
+            channel: (data[0] & 0x30) >> 2 | (data[1] & 0x30) >> 4,
         };
     }
 
