@@ -1,0 +1,9 @@
+[package]
+name = "ogk"
+version = "0.1.0"
+authors = ["TQ Hirsch <thequux@thequux.com>"]
+
+[dependencies]
+byteorder = "0.5.3"
+lz4 = "1.18"
+cdg = "0.1"

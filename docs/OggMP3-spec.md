@@ -11,22 +11,21 @@ packet; the granule position of a packet is the sample number of the
 last sample in the packet. Thus, the first packet will have a granule
 position equal to the number of samples per frame.
 
-Muxers SHOULD strip CRC protection from encoded frames; Ogg provides
-it for you.
-
-All multi-byte values are encoded big-endian to align them with
-network byte order.
+All multi-byte values are encoded little-endian to align them with
+Ogg byte order.
 
 ## Header
 
 | Offset | Length | Contents                         |
 |--------|--------|----------------------------------|
-|      0 |      8 | `OggMP3\0\0` (stream identifier)   |
+|      0 |      8 | `OggMP3\0\0` (stream identifier) |
 |      8 |      1 | Format major version (0)         |
 |      9 |      1 | Format minor version (0)         |
 |     10 |      1 | Flags                            |
 |     11 |      1 | Number of auxiliary Ogg headers  |
-|      8 |      4 | Representative frame header      |
+|     12 |      4 | Representative frame header      |
+|     16 |      4 | Sample frequency                 |
+|     20 |      4 | Samples per frame                |
 
 The major version is incremented upon incompatible changes. The minor
 version is incrememnted upon compatible changes.
@@ -41,7 +40,7 @@ being interpreted as a real MP3 frame.
 
 |     Bit | Meaning                                                |
 |---------|--------------------------------------------------------|
-| 0 (LSB) | Contains tag header packet (implies that field 3 >= 1) |
+| 0 (LSB) | Contains tag header packet (implies that field 4 >= 1) |
 |       1 | 2-channel audio                                        |
 |       2 | Shortened frame headers                                |
 
@@ -70,5 +69,5 @@ stream should be preferred to built-in tags.
 ## Notes
 
 If shortened frame headers are not used and frames don't span pages,
-the multiplexed file should be fully compatible(!) with legacy MP3
+the multiplexed file should be fully compatible with legacy MP3
 players.
