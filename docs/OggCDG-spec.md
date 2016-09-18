@@ -76,4 +76,6 @@ palette and a completely black screen (this is a reasonabke initial
 state for CDG, and therefore does not need to appear in the
 file).
 
+## Content Type
 
+The content type of an OggCDG stream SHALL be video/x-cdg

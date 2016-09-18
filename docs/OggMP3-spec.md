@@ -66,6 +66,10 @@ TODO: Define tag header
 The tag header must be an ID3v1, ID3v2, or APE tag. A separate metadata
 stream should be preferred to built-in tags.
 
+## MIME type
+
+The mime type of this stream SHALL be `audio/mpeg`.
+
 ## Notes
 
 If shortened frame headers are not used and frames don't span pages,
