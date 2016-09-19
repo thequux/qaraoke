@@ -2,6 +2,8 @@ use std::io::{self,Write};
 use std::collections;
 use rand;
 
+use util;
+
 // Low-level interface
 
 const CRC_LOOKUP : [u32;256] = [
@@ -354,7 +356,7 @@ impl OgkMux {
             if self.streams.is_empty() {
                 break;
             }
-            if let Some(stream) = self.streams.iter_mut().min_by_key(|stream| stream.packer.peek_next().unwrap().granule_position) {
+            if let Some(stream) = self.streams.iter_mut().min_by_key(|stream| stream.bitstream.map_granule(stream.packer.peek_next().unwrap().granule_position)) {
                 try!(stream.packer.take_next().unwrap().write_to(&mut w));
                 try!(stream.pump());
             } else {
@@ -363,4 +365,17 @@ impl OgkMux {
         }
         Ok(())
     }
+}
+
+// Demuxer
+
+struct StreamState {
+    buf: collections::VecDeque<Vec<u8>>,
+    hwm: u64,
+    
+}
+pub struct OggDemux<R> {
+    buffer: util::ShiftBuffer,
+    reader: R,
+    streams: HashMap<u32, 
 }
