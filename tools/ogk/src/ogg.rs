@@ -1,8 +1,16 @@
-use std::io::{self,Write};
+use std::io::{self,Write,Read};
 use std::collections;
 use rand;
 
 use util;
+
+enum StreamError {
+    Io(io::Error),
+    /// An error in the container format. If the bool is true, this
+    /// error is recoverable
+    Format(bool, String),
+    Codec(String),
+}
 
 // Low-level interface
 
@@ -72,6 +80,13 @@ const CRC_LOOKUP : [u32;256] = [
   0xafb010b1,0xab710d06,0xa6322bdf,0xa2f33668,
   0xbcb4666d,0xb8757bda,0xb5365d03,0xb1f740b4];
 
+fn crc_compute(mut value: u32, block: &[u8]) -> u32 {
+    for b in block {
+        value = value << 8 ^ CRC_LOOKUP[((value >> 24) as u8 ^ b) as usize];
+    }
+    return value;
+}
+
 pub struct Packet {
     pub content: Vec<u8>,
     pub timestamp: u64,
@@ -85,6 +100,116 @@ bitflags!{
     }
 }
 
+// This is perhaps overly whimsical. I am unashamed.
+enum ParseResult<V> {
+    No, // This is not a valid value
+    InsufficientNoms(usize), // Needs at least N total bytes
+    Yay(usize, V), // Successful parse. Consumed N bytes
+}
+
+// A page backed by an external buffer
+pub struct RefPage<'a> {
+    pub flags: PageFlags,
+    pub granule_position: u64,
+    pub stream_serial: u32,
+    pub page_sequence: u32,
+    pub segment_table: &'a [u8],
+    pub content: &'a [u8],
+}
+
+impl<'a> RefPage<'a> {
+    fn parse(buf: &'a [u8]) -> ParseResult<Self> {
+        use byteorder::{LittleEndian,ByteOrder};
+
+        // We need at least 5 bytes to find the signature
+        if buf.len() < 5 {
+            return ParseResult::InsufficientNoms(5);
+        }
+        if buf[0..5] != *b"OggS\0" {
+            return ParseResult::No;
+        }
+
+        // See if we can read the rest of the header
+        if buf.len() < 27 {
+            return ParseResult::InsufficientNoms(27);
+        }
+        // Check to see if lacing has been read completely
+        let lacing_count = buf[26] as usize;
+        if buf.len() < lacing_count + 27 {
+            return ParseResult::InsufficientNoms(lacing_count + 27);
+        }
+
+        let lacing = &buf[27..27+lacing_count];
+        let content_size : usize = lacing.iter().map(|x| *x as usize).sum();
+        let target_size = 27 + lacing_count + content_size;
+        if buf.len() < target_size {
+            return ParseResult::InsufficientNoms(target_size);
+        }
+
+        // Check the CRC
+        let mut crc = 0;
+        crc = crc_compute(crc, &buf[0..22]);
+        crc = crc_compute(crc, &[0;4]); // sub in a nulled-out CRC
+        crc = crc_compute(crc, &buf[26..27+lacing_count+content_size]);
+        let target_crc = LittleEndian::read_u32(&buf[22..26]);
+        if crc != target_crc {
+            // CRC failed
+            return ParseResult::No;
+        }
+
+        return ParseResult::Yay(target_size, RefPage{
+            flags: PageFlags::from_bits_truncate(buf[5]),
+            granule_position: LittleEndian::read_u64(&buf[6..14]),
+            stream_serial: LittleEndian::read_u32(&buf[14..18]),
+            page_sequence: LittleEndian::read_u32(&buf[18..22]),
+            segment_table: lacing,
+            content: &buf[27+lacing_count..target_size],
+        });
+    }
+
+    fn segment_count(&self) -> u8 {
+        self.segment_table.len() as u8
+    }
+
+    fn packets(&self) -> Packets {
+        Packets{
+            segment_iter: self.segment_table.iter(),
+            content: self.content,
+            byte_off: 0,
+        }
+    }
+}
+
+/// Iterator over packets within a page. The bool that is returned as
+/// well indicates whether the packet is complete.
+pub struct Packets<'a> {
+    segment_iter: ::std::slice::Iter<'a, u8>,
+    content: &'a [u8],
+    byte_off: usize,
+}
+
+impl <'a> Iterator for Packets<'a> {
+    type Item = (&'a [u8], bool);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let start = self.byte_off;
+        let mut had_iter = false;
+        for s in self.segment_iter.by_ref() {
+            had_iter = true;
+            self.byte_off += *s as usize;
+            if *s != 255 {
+                return Some((&self.content[start..self.byte_off], true));
+            }
+        }
+        if had_iter {
+            return Some((&self.content[start..self.byte_off], false))
+        } else {
+            return None;
+        }
+    }
+}   
+
+
 pub struct Page {
     pub flags: PageFlags,
     pub granule_position: u64,
@@ -93,13 +218,6 @@ pub struct Page {
     /// The last element is the number of elements used
     pub segment_table: Vec<u8>,
     pub content: Vec<u8>,
-}
-
-fn crc_compute(mut value: u32, block: &[u8]) -> u32 {
-    for b in block {
-        value = value << 8 ^ CRC_LOOKUP[((value >> 24) as u8 ^ b) as usize];
-    }
-    return value;
 }
 
 impl Page {
@@ -369,13 +487,218 @@ impl OgkMux {
 
 // Demuxer
 
-struct StreamState {
-    buf: collections::VecDeque<Vec<u8>>,
+pub trait BitstreamDecoder {
+    /// Map a granule position to a timestamp
+    fn map_granule(&self, u64) -> u64;
+
+    /// Returns the total number of headers in the stream
+    fn num_headers(&self) -> usize;
+
+    /// Called to process each header packet except the first
+    fn process_header(&mut self, &[u8]);
+
+    /// Called for each packet in the stream. Returns the granule position of this packet
+    fn process_packet(&mut self, packet: &[u8], last_granule: u64) -> u64;
+
+    /// There was a gap in the underlying page stream
+    fn notice_gap(&mut self);
+    
+    /// Called at the end of the stream
+    fn finish(&mut self);
+}
+
+struct StreamState<Desc> {
+    decoder: Box<BitstreamDecoder>,
+    
+    /// The prefix of a partial packet
+    partial: Vec<u8>,
+    
+    /// The last granule that has been read
     hwm: u64,
     
+    /// The last page sequence number seen
+    last_page_seq: u32,
+
+    /// First page sequence number
+    first_page_seq: u32,
+
+    /// EOS packet seen
+    finished: bool,
+    
+    /// This holds user data associated with the stream, such as decode buffers
+    user_data: Desc,
 }
-pub struct OggDemux<R> {
+
+impl <Desc> StreamState<Desc> {
+    pub fn process_page<'a>(&mut self, packet: RefPage) -> Result<(), StreamError> {
+        unimplemented!();
+    }
+}
+
+// Just discards everything that comes in
+struct DiscardDecoder {
+}
+
+impl BitstreamDecoder for DiscardDecoder {
+    fn map_granule(&self, granule: u64) -> u64 {
+        return granule;
+    }
+
+    fn num_headers(&self) -> usize { 1 }
+    fn process_header(&mut self, _: &[u8]) {}
+    fn process_packet(&mut self, _: &[u8], g: u64) -> u64 {g+1}
+    fn notice_gap(&mut self) {}
+    fn finish(&mut self) {}
+}
+
+pub struct OggPageSource<R> {
     buffer: util::ShiftBuffer,
     reader: R,
-    streams: HashMap<u32, 
+    dead_bytes: usize,
+    eof: bool,
 }
+
+impl <R: Read> OggPageSource<R> {
+    pub fn next_page(&mut self) -> io::Result<Option<RefPage>> {
+        'read: loop {
+            self.buffer.consume(self.dead_bytes);
+            self.dead_bytes = 0;
+            if try!(self.buffer.fill_max(&mut self.reader)) == 0 {
+                self.eof = true;
+                return Ok(None);
+            }
+            'scan: for i in 0..self.buffer.len() - 5 {
+                // Try to parse...
+                match RefPage::parse(&self.buffer[i..]) {
+                    ParseResult::No => continue 'scan,
+                    ParseResult::InsufficientNoms(_) => {
+                        if i == 0 {
+                            // We'll never be able to complete this page
+                            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete page"));
+                        }
+                        self.dead_bytes = i;
+                        continue 'read;
+                    },
+                    ParseResult::Yay(n, page_res) => {
+                        // handle the page
+                        self.dead_bytes = i + n;
+                        return Ok(Some(page_res));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn is_eof(&self) -> bool {
+        self.eof
+    }
+}
+
+struct StreamMapper<StreamDesc>{
+    streams: collections::HashMap<u32, StreamState<StreamDesc>>,
+    discard_streams: collections::HashSet<u32>,
+    // This just refers to the BOS headers.
+    headers_read: bool,
+    /// The number of streams that have started, total. Increments
+    /// each time a BOS page is seen, never decrements.
+    nstreams: usize,
+
+    /// A function to identify a stream given its first header
+    /// packet. Should return a decoder for that stream as well as a
+    /// user-defined 
+    stream_init: Box<Fn(header: &[u8]) -> Option<(Box<BitstreamDecoder>, StreamDesc)>>,
+}
+
+impl<StreamDesc> StreamMapper<StreamDesc> {
+    fn handle_page<'a>(&mut self, page: RefPage<'a>) -> Result<(),StreamError> {
+        use std::collections::hash_map::Entry;
+        if self.discard_streams.contains(&page.stream_serial) {
+            return Ok(());
+        }
+        if page.flags.intersects(PAGE_BOS) {
+            match self.streams.entry(page.stream_serial) {
+                Entry::Occupied(_) => return Err(StreamError::Format(true, "Stream has multiple BOS pages".to_owned())),
+                Entry::Vacant(e) => {
+                    let packet = {
+                        if let Some((packet, complete)) = page.packets().next() {
+                            if !complete {
+                                self.discard_streams.insert(page.stream_serial);
+                                return Err(StreamError::Format(true, "Initial header packet too large for first page".to_owned()));
+                            }
+                            packet
+                        } else {
+                            self.discard_streams.insert(page.stream_serial);
+                            return Err(StreamError::Format(true, "BOS page had no packet".to_owned()));
+                        }
+                    };
+                    if let Some((decoder, desc)) = (self.stream_init)(packet) {
+                        if page.flags.intersects(PAGE_EOS) {
+                            decoder.finish();
+                        }
+                        e.insert(StreamState{
+                            decoder: decoder,
+                            partial: Vec::new(),
+                            hwm: 0,
+                            last_page_seq: page.page_sequence,
+                            first_page_seq: page.page_sequence,
+                            user_data: desc,
+                            finished: page.flags.intersects(PAGE_EOS),
+                        });
+                        return Ok(());
+                    } else {
+                        self.discard_streams.insert(page.stream_serial);
+                        return Ok(());
+                    }
+                }
+            }
+        } else {
+            // Mid-stream
+            if let Some(state) = self.streams.get_mut(&page.stream_serial) {
+                return state.process_page(page);
+            } else {
+                self.discard_streams.insert(page.stream_serial);
+                return Err(StreamError::Format(true, "
+            }
+        }
+    }
+}
+
+
+pub struct OggDemux<R, StreamDesc> {
+    source: OggPageSource<R>,
+    mapper: StreamMapper<StreamDesc>,
+}
+
+impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
+    fn new<F>(reader: R, stream_mapper: F) -> io::Result<Self>
+        where F: Fn(u32, &[u8]) -> (Box<BitstreamDecoder>, StreamDesc)
+    {
+        let mut demux = OggDemux{
+            source: OggPageSource{
+                buffer: util::ShiftBuffer::new(65536),
+                reader: reader,
+                dead_bytes: 0,
+                eof: false,
+            },
+            mapper: StreamMapper{
+                streams: collections::HashMap::new(),
+                headers_read: false,
+            },
+        };
+
+        while !demux.mapper.headers_read && !demux.source.is_eof() {
+            try!(demux.pump_page());
+        }
+
+        return Ok(demux);
+    }
+
+    pub fn is_eof(&self) -> bool {
+        false
+    }
+    
+    pub fn pump_page(&mut self) -> io::Result<()> {
+        self.mapper.handle_page(try!(self.source.next_page()));
+    }        
+}
+
