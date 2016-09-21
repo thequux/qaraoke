@@ -4,12 +4,18 @@ use rand;
 
 use util;
 
-enum StreamError {
+pub enum StreamError {
     Io(io::Error),
     /// An error in the container format. If the bool is true, this
     /// error is recoverable
     Format(bool, String),
     Codec(String),
+}
+
+impl From<io::Error> for StreamError {
+    fn from(err: io::Error) -> Self {
+        StreamError::Io(err)
+    }
 }
 
 // Low-level interface
@@ -558,8 +564,14 @@ pub struct OggPageSource<R> {
     eof: bool,
 }
 
+// TODO: When nonlexical lifetimes land, kill this with fire.
+unsafe fn unalias<'a,'b, E: ?Sized>(elem: &'a E) -> &'b E {
+    let a: *const E = unsafe { &*elem };
+    unsafe {&*a}
+}
+
 impl <R: Read> OggPageSource<R> {
-    pub fn next_page(&mut self) -> io::Result<Option<RefPage>> {
+    pub fn next_page(&mut self) -> Result<Option<RefPage>, StreamError> {
         'read: loop {
             self.buffer.consume(self.dead_bytes);
             self.dead_bytes = 0;
@@ -568,16 +580,18 @@ impl <R: Read> OggPageSource<R> {
                 return Ok(None);
             }
             'scan: for i in 0..self.buffer.len() - 5 {
-                // Try to parse...
-                match RefPage::parse(&self.buffer[i..]) {
-                    ParseResult::No => continue 'scan,
+                // Try to parse...  The unsafe unalias simply divorces
+                // the borrow of buffer from the lifetime of this
+                // function, so that the loop still works.
+                match RefPage::parse(unsafe{unalias(&self.buffer[i..])}) {
+                    ParseResult::No => continue,
                     ParseResult::InsufficientNoms(_) => {
                         if i == 0 {
                             // We'll never be able to complete this page
-                            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete page"));
+                            return Err(StreamError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete page")));
                         }
                         self.dead_bytes = i;
-                        continue 'read;
+                        break;
                     },
                     ParseResult::Yay(n, page_res) => {
                         // handle the page
@@ -599,14 +613,12 @@ struct StreamMapper<StreamDesc>{
     discard_streams: collections::HashSet<u32>,
     // This just refers to the BOS headers.
     headers_read: bool,
-    /// The number of streams that have started, total. Increments
-    /// each time a BOS page is seen, never decrements.
-    nstreams: usize,
 
     /// A function to identify a stream given its first header
     /// packet. Should return a decoder for that stream as well as a
-    /// user-defined 
-    stream_init: Box<Fn(header: &[u8]) -> Option<(Box<BitstreamDecoder>, StreamDesc)>>,
+    /// user-defined data value that must be the same type across all
+    /// streams within a demux
+    stream_init: Box<Fn(&[u8]) -> Option<(Box<BitstreamDecoder>, StreamDesc)>>,
 }
 
 impl<StreamDesc> StreamMapper<StreamDesc> {
@@ -631,7 +643,7 @@ impl<StreamDesc> StreamMapper<StreamDesc> {
                             return Err(StreamError::Format(true, "BOS page had no packet".to_owned()));
                         }
                     };
-                    if let Some((decoder, desc)) = (self.stream_init)(packet) {
+                    if let Some((mut decoder, desc)) = (self.stream_init)(packet) {
                         if page.flags.intersects(PAGE_EOS) {
                             decoder.finish();
                         }
@@ -657,7 +669,7 @@ impl<StreamDesc> StreamMapper<StreamDesc> {
                 return state.process_page(page);
             } else {
                 self.discard_streams.insert(page.stream_serial);
-                return Err(StreamError::Format(true, "
+                return Err(StreamError::Format(true, format!("Stream {} had no BOS packet", page.stream_serial)));
             }
         }
     }
@@ -670,8 +682,8 @@ pub struct OggDemux<R, StreamDesc> {
 }
 
 impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
-    fn new<F>(reader: R, stream_mapper: F) -> io::Result<Self>
-        where F: Fn(u32, &[u8]) -> (Box<BitstreamDecoder>, StreamDesc)
+    fn new<F>(reader: R, stream_mapper: F) -> Result<Self, StreamError>
+        where F: 'static + Fn(&[u8]) -> Option<(Box<BitstreamDecoder>, StreamDesc)>
     {
         let mut demux = OggDemux{
             source: OggPageSource{
@@ -682,7 +694,9 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
             },
             mapper: StreamMapper{
                 streams: collections::HashMap::new(),
+                discard_streams: collections::HashSet::new(),
                 headers_read: false,
+                stream_init: Box::new(stream_mapper),
             },
         };
 
@@ -694,11 +708,15 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
     }
 
     pub fn is_eof(&self) -> bool {
-        false
+        self.source.is_eof()
     }
     
-    pub fn pump_page(&mut self) -> io::Result<()> {
-        self.mapper.handle_page(try!(self.source.next_page()));
+    pub fn pump_page(&mut self) -> Result<(), StreamError> {
+        if let Some(page) = try!(self.source.next_page()) {
+            self.mapper.handle_page(page)
+        } else {
+            Ok(())
+        }
     }        
 }
 
