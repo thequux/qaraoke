@@ -4,6 +4,7 @@ use rand;
 
 use util;
 
+#[derive(Debug)]
 pub enum StreamError {
     Io(io::Error),
     /// An error in the container format. If the bool is true, this
@@ -171,10 +172,6 @@ impl<'a> RefPage<'a> {
             segment_table: lacing,
             content: &buf[27+lacing_count..target_size],
         });
-    }
-
-    fn segment_count(&self) -> u8 {
-        self.segment_table.len() as u8
     }
 
     fn packets(&self) -> Packets {
@@ -506,7 +503,10 @@ pub trait BitstreamDecoder {
     /// Called for each packet in the stream. Returns the granule position of this packet
     fn process_packet(&mut self, packet: &[u8], last_granule: u64) -> u64;
 
-    /// There was a gap in the underlying page stream
+    /// There was a gap in the underlying page stream. May be called
+    /// multiple times in a row; should therefore be idempotent.
+    // This will happen when we regain sync on a page that contains a
+    // single 65025-byte segment and the CTD bit set
     fn notice_gap(&mut self);
     
     /// Called at the end of the stream
@@ -525,8 +525,8 @@ struct StreamState<Desc> {
     /// The last page sequence number seen
     last_page_seq: u32,
 
-    /// First page sequence number
-    first_page_seq: u32,
+    /// Number of remaining header packets
+    headers_remaining: usize,
 
     /// EOS packet seen
     finished: bool,
@@ -536,26 +536,59 @@ struct StreamState<Desc> {
 }
 
 impl <Desc> StreamState<Desc> {
-    pub fn process_page<'a>(&mut self, packet: RefPage) -> Result<(), StreamError> {
-        unimplemented!();
+    pub fn process_page<'a>(&mut self, page: RefPage) -> Result<(), StreamError> {
+        let had_gap = page.page_sequence != self.last_page_seq + 1;
+        if had_gap {
+            if page.segment_table.iter().filter(|x| **x != 255).count() == 0 {
+                // This page doesn't have any packets that finish on it.
+                return Ok(());
+            }
+            self.decoder.notice_gap();
+        }
+        
+        self.last_page_seq = page.page_sequence;
+
+        for (i, (packet, completep)) in page.packets().enumerate() {
+            let packet_continued = i == 0 && page.flags.intersects(PAGE_CTD);
+            if had_gap && packet_continued {
+                // We do nothing with an incomplete packet
+                continue;
+            }
+            
+            if !packet_continued {
+                self.partial.clear();
+            }
+
+            if !completep {
+                self.partial.extend(packet);
+                break;
+            } else {
+                // Get a reference to the packet body
+                let packet_ref = if packet_continued {
+                    &self.partial
+                } else {
+                    packet
+                };
+
+                // process it
+                if self.headers_remaining > 0 {
+                    self.headers_remaining -= 1;
+                    self.decoder.process_header(packet);
+                } else {
+                    self.hwm = self.decoder.process_packet(packet_ref, self.hwm);
+                }
+            }
+        }
+
+        if page.flags.intersects(PAGE_EOS) {
+            self.decoder.finish();
+            self.finished = true;
+        }
+
+        Ok(())
     }
 }
 
-// Just discards everything that comes in
-struct DiscardDecoder {
-}
-
-impl BitstreamDecoder for DiscardDecoder {
-    fn map_granule(&self, granule: u64) -> u64 {
-        return granule;
-    }
-
-    fn num_headers(&self) -> usize { 1 }
-    fn process_header(&mut self, _: &[u8]) {}
-    fn process_packet(&mut self, _: &[u8], g: u64) -> u64 {g+1}
-    fn notice_gap(&mut self) {}
-    fn finish(&mut self) {}
-}
 
 pub struct OggPageSource<R> {
     buffer: util::ShiftBuffer,
@@ -566,8 +599,7 @@ pub struct OggPageSource<R> {
 
 // TODO: When nonlexical lifetimes land, kill this with fire.
 unsafe fn unalias<'a,'b, E: ?Sized>(elem: &'a E) -> &'b E {
-    let a: *const E = unsafe { &*elem };
-    unsafe {&*a}
+    &*(elem as *const E)
 }
 
 impl <R: Read> OggPageSource<R> {
@@ -584,9 +616,14 @@ impl <R: Read> OggPageSource<R> {
                 // the borrow of buffer from the lifetime of this
                 // function, so that the loop still works.
                 match RefPage::parse(unsafe{unalias(&self.buffer[i..])}) {
-                    ParseResult::No => continue,
-                    ParseResult::InsufficientNoms(_) => {
+                    ParseResult::No => { println!("Skipping"); continue; },
+                    ParseResult::InsufficientNoms(n) => {
                         if i == 0 {
+                            if self.buffer.len() == 0 {
+                                self.eof = true;
+                                return Ok(None);
+                            }
+                            //println!("EOF at offset {}; need {} had {} (contents {})", self.buffer.offset(), n, self.buffer.len(), &self.buffer[..].iter().map(|x| format!("{:02x}", x)).collect::<Vec<String>>().join(""));
                             // We'll never be able to complete this page
                             return Err(StreamError::Io(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete page")));
                         }
@@ -647,13 +684,14 @@ impl<StreamDesc> StreamMapper<StreamDesc> {
                         if page.flags.intersects(PAGE_EOS) {
                             decoder.finish();
                         }
+                        let num_headers = decoder.num_headers();
                         e.insert(StreamState{
                             decoder: decoder,
                             partial: Vec::new(),
                             hwm: 0,
                             last_page_seq: page.page_sequence,
-                            first_page_seq: page.page_sequence,
                             user_data: desc,
+                            headers_remaining: num_headers - 1,
                             finished: page.flags.intersects(PAGE_EOS),
                         });
                         return Ok(());
@@ -664,6 +702,7 @@ impl<StreamDesc> StreamMapper<StreamDesc> {
                 }
             }
         } else {
+            self.headers_read = true;
             // Mid-stream
             if let Some(state) = self.streams.get_mut(&page.stream_serial) {
                 return state.process_page(page);
@@ -682,7 +721,7 @@ pub struct OggDemux<R, StreamDesc> {
 }
 
 impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
-    fn new<F>(reader: R, stream_mapper: F) -> Result<Self, StreamError>
+    pub fn new<F>(reader: R, stream_mapper: F) -> Result<Self, StreamError>
         where F: 'static + Fn(&[u8]) -> Option<(Box<BitstreamDecoder>, StreamDesc)>
     {
         let mut demux = OggDemux{
@@ -717,6 +756,21 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
         } else {
             Ok(())
         }
-    }        
+    }
+
+    pub fn streams(&self) -> DemuxStreams<StreamDesc> {
+        DemuxStreams(self.mapper.streams.iter())
+    }
 }
+
+pub struct DemuxStreams<'a, Desc: 'a>(collections::hash_map::Iter<'a, u32, StreamState<Desc>>);
+
+impl <'a, Desc> Iterator for DemuxStreams<'a, Desc> {
+    type Item = (u32, &'a Desc);
+
+    fn next(&mut self) -> Option<(u32, &'a Desc)> {
+        self.0.next().map(|(id,state)| (*id, &state.user_data))
+    }
+}
+
 

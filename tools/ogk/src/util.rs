@@ -18,6 +18,9 @@ pub struct ShiftBuffer {
     rptr: usize,
     /// the offset at which to write
     wptr: usize,
+
+    /// Offset of buffer[0]
+    passed_data: usize,
 }    
 
 impl ShiftBuffer {
@@ -30,6 +33,8 @@ impl ShiftBuffer {
             max_block: max_block,
             rptr: 0,
             wptr: 0,
+
+            passed_data: 0,
         }
     }
 
@@ -56,17 +61,21 @@ impl ShiftBuffer {
         if len + self.len() > self.max_block {
             panic!("Tried to read too much into a buffer");
         }
-        reader.read(&mut self.content[self.wptr..self.wptr+len]).map(|count| {self.wptr += count; count})
+        reader.read(&mut self.content[self.wptr..self.wptr+len]).map(|count| {self.wptr += count; self.passed_data += count; count})
     }
 
     pub fn fill_to<R: Read>(&mut self, reader: &mut R, target: usize) -> io::Result<usize> {
-        let len = self.len();
         assert!(target <= self.max_block);
-        if len >= target {
-            Ok(0)
-        } else {
-            self.fill(reader, target - len)
+        let mut read = 0;
+        while self.len() < target {
+            let len = self.len();
+            let count = try!(self.fill(reader, target - len));
+            read += count;
+            if count == 0 {
+                return Ok(read);
+            }
         }
+        Ok(read)
     }
 
     pub fn fill_max<R: Read>(&mut self, reader: &mut R) -> io::Result<usize> {
@@ -81,6 +90,10 @@ impl ShiftBuffer {
         let res = &self.content[self.rptr..self.rptr + amount];
         self.rptr += amount;
         res
+    }
+
+    pub fn offset(&self) -> usize {
+        self.passed_data
     }
 }
 
