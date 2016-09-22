@@ -617,7 +617,7 @@ impl <R: Read> OggPageSource<R> {
                 // function, so that the loop still works.
                 match RefPage::parse(unsafe{unalias(&self.buffer[i..])}) {
                     ParseResult::No => { println!("Skipping"); continue; },
-                    ParseResult::InsufficientNoms(n) => {
+                    ParseResult::InsufficientNoms(_) => {
                         if i == 0 {
                             if self.buffer.len() == 0 {
                                 self.eof = true;
@@ -650,6 +650,10 @@ struct StreamMapper<StreamDesc>{
     discard_streams: collections::HashSet<u32>,
     // This just refers to the BOS headers.
     headers_read: bool,
+
+    /// High water mark. This is in µs rather than a granule position
+    /// as in StreamState
+    hwm: u64,
 
     /// A function to identify a stream given its first header
     /// packet. Should return a decoder for that stream as well as a
@@ -705,7 +709,10 @@ impl<StreamDesc> StreamMapper<StreamDesc> {
             self.headers_read = true;
             // Mid-stream
             if let Some(state) = self.streams.get_mut(&page.stream_serial) {
-                return state.process_page(page);
+                try!(state.process_page(page));
+                let hwm = state.decoder.map_granule(state.hwm);
+                self.hwm = ::std::cmp::max(self.hwm, hwm);
+                return Ok(());
             } else {
                 self.discard_streams.insert(page.stream_serial);
                 return Err(StreamError::Format(true, format!("Stream {} had no BOS packet", page.stream_serial)));
@@ -735,17 +742,29 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
                 streams: collections::HashMap::new(),
                 discard_streams: collections::HashSet::new(),
                 headers_read: false,
+                hwm: 0,
                 stream_init: Box::new(stream_mapper),
             },
         };
 
-        while !demux.mapper.headers_read && !demux.source.is_eof() {
-            try!(demux.pump_page());
-        }
+        //while !demux.mapper.headers_read && !demux.source.is_eof() {
+        //    try!(demux.pump_page());
+        //}
+
+        try!(demux.internal_pump_until(|ogg| ogg.mapper.headers_read));
 
         return Ok(demux);
     }
 
+    fn internal_pump_until<F>(&mut self, predicate: F) -> Result<(), StreamError>
+        where F: Fn(&Self) -> bool
+    {
+        while !predicate(&self) && !self.source.is_eof() {
+            try!(self.pump_page());
+        }
+        Ok(())
+    }
+    
     pub fn is_eof(&self) -> bool {
         self.source.is_eof()
     }
@@ -760,6 +779,12 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
 
     pub fn streams(&self) -> DemuxStreams<StreamDesc> {
         DemuxStreams(self.mapper.streams.iter())
+    }
+
+    /// Takes time in µs
+    pub fn pump_until(&mut self, time: u64) -> Result<u64, StreamError> {
+        try!(self.internal_pump_until(|ogg| ogg.mapper.hwm >= time));
+        Ok(self.mapper.hwm)
     }
 }
 
