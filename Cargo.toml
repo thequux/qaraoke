@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "tools/ogk-tool",
+    "tools/ogk",
+    "player/cdg",
+    "player/cdg_renderer",
+    "player/qaraoke",
+]
