@@ -53,6 +53,10 @@ impl ShiftBuffer {
         self.wptr - self.rptr
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.wptr == self.rptr
+    }
+
     pub fn fill<R: Read>(&mut self, reader: &mut R, len: usize) -> io::Result<usize> {
         // We only attempt to shift when writing, to reduce needless
         // shifts Further, shift only actually shifts when it can

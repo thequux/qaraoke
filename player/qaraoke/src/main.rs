@@ -4,7 +4,9 @@ extern crate cdg_renderer;
 extern crate glium;
 extern crate image;
 extern crate fps_counter;
+extern crate ogk;
 use std::borrow::Cow;
+
 
 // TODO: Add glium_pib for bare metal Raspberry Pi support
 
@@ -63,9 +65,6 @@ fn main() {
 
     let program = glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None).unwrap();
     
-    use std::io::Cursor;
-
-    let mut interp = cdg_renderer::CdgInterpreter::new();
     let mut frame_count = 0;
     let mut fps = fps_counter::FPSCounter::new();
     let start_time = std::time::Instant::now();
@@ -82,7 +81,7 @@ fn main() {
         target.clear_color(0.0, 0.0, 1.0, 1.0);
 
         let glimage = glium::texture::RawImage2d{
-            data: Cow::Borrowed(&player_image),
+            data: Cow::Borrowed(player_image),
             width: 300,
             height: 216,
             format: glium::texture::ClientFormat::U8U8U8U8,
@@ -108,11 +107,10 @@ fn main() {
             display.get_window().map(|win| win.set_title(&format!("{} fps", fps_c)));
         }
     }
-    println!("Hello, world!");
 }
 
 struct CdgPlayer {
-    cdgStream: cdg::SubchannelStreamIter<Box<std::io::Read>>,
+    cdg_stream: cdg::SubchannelStreamIter<Box<std::io::Read>>,
     interp: cdg_renderer::CdgInterpreter,
 
     current_sector: u32,
@@ -127,7 +125,7 @@ impl CdgPlayer {
         let file = Box::new(try!(std::fs::File::open(filename)));
         
         Ok(CdgPlayer{
-            cdgStream: cdg::SubchannelStreamIter::new(file),
+            cdg_stream: cdg::SubchannelStreamIter::new(file),
             interp: cdg_renderer::CdgInterpreter::new(),
 
             current_sector: 0,
@@ -144,7 +142,7 @@ impl CdgPlayer {
     fn update(&mut self, time: u32) {
         let target_sector = time * 3 / 40;
         while self.current_sector < target_sector && !self.finished {
-            if let Some(cmds) = self.cdgStream.next() {
+            if let Some(cmds) = self.cdg_stream.next() {
                 for cmd in cmds {
                     self.interp.handle_cmd(cmd)
                 }

@@ -91,7 +91,7 @@ fn crc_compute(mut value: u32, block: &[u8]) -> u32 {
     for b in block {
         value = value << 8 ^ CRC_LOOKUP[((value >> 24) as u8 ^ b) as usize];
     }
-    return value;
+    value
 }
 
 pub struct Packet {
@@ -164,14 +164,14 @@ impl<'a> RefPage<'a> {
             return ParseResult::No;
         }
 
-        return ParseResult::Yay(target_size, RefPage{
+        ParseResult::Yay(target_size, RefPage{
             flags: PageFlags::from_bits_truncate(buf[5]),
             granule_position: LittleEndian::read_u64(&buf[6..14]),
             stream_serial: LittleEndian::read_u32(&buf[14..18]),
             page_sequence: LittleEndian::read_u32(&buf[18..22]),
             segment_table: lacing,
             content: &buf[27+lacing_count..target_size],
-        });
+        })
     }
 
     fn packets(&self) -> Packets {
@@ -205,9 +205,9 @@ impl <'a> Iterator for Packets<'a> {
             }
         }
         if had_iter {
-            return Some((&self.content[start..self.byte_off], false))
+            Some((&self.content[start..self.byte_off], false))
         } else {
-            return None;
+            None
         }
     }
 }   
@@ -262,7 +262,7 @@ impl Page {
         assert!(segment.len() < 256);
         assert!(self.segment_table.len() < 255);
         self.segment_table.push(segment.len() as u8);
-        self.content.extend(segment);
+        self.content.extend_from_slice(segment);
     }
 
     fn has_space(&self) -> bool {
@@ -298,14 +298,14 @@ impl Page {
             assert!(plen - offset < 255);
             self.add_segment(&packet.content[offset..]);
             self.granule_position = packet.timestamp;
-            return None;
+            None
         } else {
-            return Some(offset);
+            Some(offset)
         }
     }
 
     pub fn content_size(&self) -> usize {
-        return self.segment_table.iter().map(|x| *x as usize).sum();
+        self.segment_table.iter().map(|x| *x as usize).sum()
     }
 }
 
@@ -421,6 +421,10 @@ pub struct OgkMux {
     streams: Vec<MuxStream>,
 }
 
+impl Default for OgkMux {
+    fn default() -> Self { Self::new() }
+}
+
 impl OgkMux {
     pub fn new() -> Self {
         OgkMux{
@@ -438,7 +442,7 @@ impl OgkMux {
 
     pub fn write_to<W: io::Write>(&mut self, mut w: W) -> io::Result<()> {
         // Write headers...
-        for stream in self.streams.iter_mut() {
+        for stream in &mut self.streams {
             let headers = stream.bitstream.headers();
             let first_packet = try!(stream.bitstream.next_frame());
             let header_count = headers.len();
@@ -462,13 +466,13 @@ impl OgkMux {
         }
 
         // Write the remaining header packets
-        for stream in self.streams.iter_mut() {
+        for stream in &mut self.streams {
             while let Some(frame) = stream.packer.take_next() {
                 try!(frame.write_to(&mut w));
             }
         }
 
-        for stream in self.streams.iter_mut() {
+        for stream in &mut self.streams {
             try!(stream.pump());
         }
 
@@ -536,7 +540,7 @@ struct StreamState<Desc> {
 }
 
 impl <Desc> StreamState<Desc> {
-    pub fn process_page<'a>(&mut self, page: RefPage) -> Result<(), StreamError> {
+    pub fn process_page(&mut self, page: RefPage) -> Result<(), StreamError> {
         let had_gap = page.page_sequence != self.last_page_seq + 1;
         if had_gap {
             if page.segment_table.iter().filter(|x| **x != 255).count() == 0 {
@@ -560,7 +564,7 @@ impl <Desc> StreamState<Desc> {
             }
 
             if !completep {
-                self.partial.extend(packet);
+                self.partial.extend_from_slice(packet);
                 break;
             } else {
                 // Get a reference to the packet body
@@ -604,14 +608,14 @@ unsafe fn unalias<'a,'b, E: ?Sized>(elem: &'a E) -> &'b E {
 
 impl <R: Read> OggPageSource<R> {
     pub fn next_page(&mut self) -> Result<Option<RefPage>, StreamError> {
-        'read: loop {
+        loop {
             self.buffer.consume(self.dead_bytes);
             self.dead_bytes = 0;
             if try!(self.buffer.fill_max(&mut self.reader)) == 0 {
                 self.eof = true;
                 return Ok(None);
             }
-            'scan: for i in 0..self.buffer.len() - 5 {
+            for i in 0..self.buffer.len() - 5 {
                 // Try to parse...  The unsafe unalias simply divorces
                 // the borrow of buffer from the lifetime of this
                 // function, so that the loop still works.
@@ -619,7 +623,7 @@ impl <R: Read> OggPageSource<R> {
                     ParseResult::No => { println!("Skipping"); continue; },
                     ParseResult::InsufficientNoms(_) => {
                         if i == 0 {
-                            if self.buffer.len() == 0 {
+                            if self.buffer.is_empty() {
                                 self.eof = true;
                                 return Ok(None);
                             }
@@ -645,6 +649,8 @@ impl <R: Read> OggPageSource<R> {
     }
 }
 
+pub type StreamInitFn<StreamDesc> = Fn(&[u8]) -> Option<(Box<BitstreamDecoder>, StreamDesc)>;
+
 struct StreamMapper<StreamDesc>{
     streams: collections::HashMap<u32, StreamState<StreamDesc>>,
     discard_streams: collections::HashSet<u32>,
@@ -659,11 +665,12 @@ struct StreamMapper<StreamDesc>{
     /// packet. Should return a decoder for that stream as well as a
     /// user-defined data value that must be the same type across all
     /// streams within a demux
-    stream_init: Box<Fn(&[u8]) -> Option<(Box<BitstreamDecoder>, StreamDesc)>>,
+    stream_init: Box<StreamInitFn<StreamDesc>>,
 }
 
 impl<StreamDesc> StreamMapper<StreamDesc> {
-    fn handle_page<'a>(&mut self, page: RefPage<'a>) -> Result<(),StreamError> {
+    #[allow(needless_return)] // This is a long enough function that I'll give it a pass.
+    fn handle_page(&mut self, page: RefPage) -> Result<(),StreamError> {
         use std::collections::hash_map::Entry;
         if self.discard_streams.contains(&page.stream_serial) {
             return Ok(());
@@ -753,13 +760,13 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
 
         try!(demux.internal_pump_until(|ogg| ogg.mapper.headers_read));
 
-        return Ok(demux);
+        Ok(demux)
     }
 
     fn internal_pump_until<F>(&mut self, predicate: F) -> Result<(), StreamError>
         where F: Fn(&Self) -> bool
     {
-        while !predicate(&self) && !self.source.is_eof() {
+        while !predicate(self) && !self.source.is_eof() {
             try!(self.pump_page());
         }
         Ok(())

@@ -35,7 +35,7 @@ impl <R: Read> ogg::BitstreamCoder for OggCdgCoder<R> {
         header.push(0);
         header.push(1); // LZ4
         header.push(self.packetsize);
-        return vec![header];
+        vec![header]
     }
 
     fn next_frame(&mut self) -> io::Result<Option<ogg::Packet>> {
@@ -65,13 +65,13 @@ impl <R: Read> ogg::BitstreamCoder for OggCdgCoder<R> {
         
         self.cur_frame += size as u64 / 96;
 
-        return Ok(Some(ogg::Packet{
+        Ok(Some(ogg::Packet{
             content: output,
             timestamp: self.cur_frame << 32 | self.last_keyframe,
-        }));
+        }))
     }
 
     fn map_granule(&self, granule: u64) -> u64 {
-        return (granule >> 32) * 1000_000 / 75;
+        (granule >> 32) * 1000_000 / 75
     }
 }

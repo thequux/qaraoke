@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+#![allow(unknown_lints)]
 //! A CD+G parser
 //!
 //! This documentation is probably best read alongside [CD+G Revealed](http://jbum.com/sware/cdg_revealed.txt)
@@ -43,10 +44,7 @@ impl Tile {
         }
         let mut content = [0; 12];
         iter_copy(content[..].iter_mut(), data[4..16].iter().map(|x| x & 0x3F));
-        //for (dest,src) in content[..].iter_mut().zip(data[4..16]) {
-        //    *dest = *src & 0x03F;
-        //}
-        return Tile{
+        Tile{
             pos: (data[3] & 0x3F, data[2] & 0x1F),
             color: (data[0] & 0x0F, data[1] & 0x0F), 
             content: content,
@@ -54,7 +52,7 @@ impl Tile {
             // have access to the real specs, so I don't know if it's
             // accurate.
             channel: (data[0] & 0x30) >> 2 | (data[1] & 0x30) >> 4,
-        };
+        }
     }
 
     /// Return the CLUT index of the pixel at x,y
@@ -85,10 +83,9 @@ impl ScrollCommand {
     fn from_u8(x: u8) -> Self {
         // Returns the scroll command from bits 4 and 5 of x
         match x & 0x30 {
-            0x0 => ScrollCommand::Noop,
             0x10 => ScrollCommand::SE,
             0x20 => ScrollCommand::NW,
-            _ => ScrollCommand::Noop, // Actually invalid
+            _ => ScrollCommand::Noop, // Invalid or NOOP
         }
     }
 }
@@ -143,7 +140,7 @@ impl RgbColor {
     /// The green component evenly scaled to 0..255
     pub fn g(&self) -> u8 {expand4to8((self.0 >> 4) & 0xF)}
     /// The blue component evenly scaled to 0..255
-    pub fn b(&self) -> u8 {expand4to8((self.0 >> 0) & 0xF)}
+    pub fn b(&self) -> u8 {expand4to8((self.0     ) & 0xF)}
 }
 
 /// One drawing command
@@ -294,8 +291,10 @@ impl <R: Read> SubchannelStreamIter<R> {
             reader: reader,
         }
     }
+    
     /// Fetch the next sector from the input file.
     /// Returns None at EOF
+    #[allow(should_implement_trait)] // We really should, but until Rust gets higher-kinded types, we can't.
     pub fn next(&mut self) -> Option<SectorIter> {
         match self.reader.read_exact(&mut self.sector_buf) {
             Ok(_) => Some(SectorIter::new(&self.sector_buf)),

@@ -24,7 +24,7 @@ impl <R: Read> Mp3Stream<R> {
         loop {
             try!(self.buffer.fill_max(&mut self.reader));
             // find the beginning of a frame
-            if self.buffer.len() == 0 {
+            if self.buffer.is_empty() {
                 // Must have been an EOF
                 return Ok(None);
             }
@@ -51,7 +51,7 @@ impl <R: Read> Mp3Stream<R> {
             }
             // Validate the frame.
             match mpg_get_frame_size(&self.buffer[0..4]) {
-                Some(len) => return Ok(Some(&self.buffer.consume(len))),
+                Some(len) => return Ok(Some(self.buffer.consume(len))),
                 None => {
                     // false match
                     self.buffer.consume(1);
@@ -236,7 +236,7 @@ impl <R: Read> ogg::BitstreamCoder for OggMP3Coder<R> {
     fn next_frame(&mut self) -> io::Result<Option<ogg::Packet>> {
         if self.last_sample_no == 0 {
             self.last_sample_no = self.samples_per_frame as u64;
-            return Ok(self.first_frame.take().map(|mut frame| {frame.timestamp = self.last_sample_no; frame}));
+            Ok(self.first_frame.take().map(|mut frame| {frame.timestamp = self.last_sample_no; frame}))
         } else {
             self.last_sample_no += self.samples_per_frame as u64;
             let next_frame = self.last_sample_no;
@@ -250,7 +250,7 @@ impl <R: Read> ogg::BitstreamCoder for OggMP3Coder<R> {
     }
 
     fn map_granule(&self, timestamp: u64) -> u64 {
-        return timestamp * 1000_000 / self.sample_frequency as u64;
+        timestamp * 1000_000 / self.sample_frequency as u64
     }
 }
 

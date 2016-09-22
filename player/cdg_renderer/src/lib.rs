@@ -86,7 +86,7 @@ impl <'a> TileView<'a> {
 
 impl <'b> Index<(u8,u8)> for TileView<'b> {
     type Output = u8;
-    fn index<'a>(&'a self, pos: (u8,u8)) -> &'a u8 {
+    fn index(&self, pos: (u8,u8)) -> &u8 {
         assert!(pos.0 < 6 && pos.1 < 12);
         unsafe {
             self.interp.content.get_unchecked(self.y + pos.1 as usize).get_unchecked(self.x + pos.0 as usize)
@@ -95,7 +95,7 @@ impl <'b> Index<(u8,u8)> for TileView<'b> {
 }
 
 impl <'b> IndexMut<(u8,u8)> for TileView<'b> {
-    fn index_mut<'a>(&'a mut self, pos: (u8,u8)) -> &'a mut u8 {
+    fn index_mut(&mut self, pos: (u8,u8)) -> &mut u8 {
         assert!(pos.0 < 6 && pos.1 < 12);
         unsafe {
             self.interp.content.get_unchecked_mut(self.y + pos.1 as usize).get_unchecked_mut(self.x + pos.0 as usize)
@@ -201,7 +201,7 @@ impl CdgInterpreter {
         let new_tilep = Position::new(pos.0 as u16 + 1, pos.1 as u16 + 1);
         self.dirty = self.dirty
             .map(|x| x.expand(new_tile))
-            .or(Some(Rectangle::new(new_tile,new_tilep)));
+            .or_else(|| Some(Rectangle::new(new_tile,new_tilep)));
     }
 
     fn invalidate_all(&mut self) {
@@ -319,6 +319,12 @@ impl CdgInterpreter {
             
         }
     }    
+}
+
+impl Default for CdgInterpreter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
