@@ -10,4 +10,5 @@ glium = "0.15"
 clap = "2.12"
 image = "0.10"
 fps_counter = "0.2"
-portaudio = "0.7"
+portaudio = "0.7" 
+ogk = {path="../../tools/ogk"}
