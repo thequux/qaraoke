@@ -513,7 +513,8 @@ pub trait BitstreamDecoder {
     // single 65025-byte segment and the CTD bit set
     fn notice_gap(&mut self);
     
-    /// Called at the end of the stream
+    /// Called at the end of the stream. This is guaranteed to be
+    /// called before the page is finished being processed.
     fn finish(&mut self);
 }
 

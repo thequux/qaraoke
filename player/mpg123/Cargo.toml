@@ -1,0 +1,11 @@
+[package]
+authors = ["TQ Hirsch <thequux@thequux.com>"]
+name = "mpg123"
+version = "0.1.0"
+
+[dependencies]
+enum_primitive = "0.1.0"
+num = "0.1.35"
+
+[dependencies.mpg123-sys]
+path = "../mpg123-sys"

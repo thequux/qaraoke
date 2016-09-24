@@ -6,4 +6,5 @@ members = [
     "player/cdg_renderer",
     "player/qaraoke",
     "player/mpg123-sys",
+    "player/mpg123",
 ]
