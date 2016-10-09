@@ -165,6 +165,6 @@ impl CdgHeader {
     /// Decode a packet from the middle of the stream
     pub fn decode_packet<'a>(&self, buf: &'a [u8]) -> Option<(PacketType, Cow<'a, [u8]>)> {
         let typ = PacketType::from_u8(buf[0]);
-        self.decompress_packet(&buf[1..]).ok().map(|pkt| (typ, pkt))
+        self.decompress_packet(&buf[2..]).ok().map(|pkt| (typ, pkt))
     }
 }

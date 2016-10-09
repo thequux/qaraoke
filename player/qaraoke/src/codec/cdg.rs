@@ -91,6 +91,7 @@ impl Default for DecodeChannel {
 }
 
 type CommandQueue = Rc<RefCell<DecodeChannel>>;
+
 pub struct CdgPlayer {
     // The first element of the pair is the 75fps frame in which the
     // command should be executed.
@@ -125,7 +126,7 @@ impl CdgPlayer {
     /// 
     fn update(&mut self, time: u32) {
         let target_sector = time * 3 / 40;
-        let stream = self.cdg_stream.borrow_mut();
+        let mut stream = self.cdg_stream.borrow_mut();
         while self.current_sector < target_sector {
             if let Some((ts, cmd)) = stream.queue.pop_front() {
                 if ts > target_sector {
@@ -138,10 +139,9 @@ impl CdgPlayer {
         }
     }
 
-    fn render(&mut self) -> &image::RgbaImage {
+    fn render(&mut self) {
         use image::GenericImage;
         self.out_buffer.copy_from(&self.interp, 0,0);
-        &self.out_buffer
     }
 }
 
@@ -152,15 +152,14 @@ impl <S: glium::Surface> types::VideoCodec<S> for CdgPlayer {
     
     fn render_frame(&mut self, ctx: &Rc<glium::backend::Context>, target: &mut S, when: u32) {
         self.update(when);
+        self.render();
         let rsrc = self.render_resources.as_ref().unwrap();
-        let player_image = self.render();
 
         // Render
-        use glium::Surface;
         target.clear_color(0.0, 0.0, 1.0, 1.0);
 
         let glimage = glium::texture::RawImage2d{
-            data: Cow::Borrowed(player_image),
+            data: Cow::Borrowed(&self.out_buffer),
             width: 300,
             height: 216,
             format: glium::texture::ClientFormat::U8U8U8U8,
@@ -182,7 +181,7 @@ struct CdgDecoder {
 impl ogg::BitstreamDecoder for CdgDecoder {
     fn map_granule(&self, granule: u64) -> u64 { (granule >> 20) * 40_000 / 3 }
 
-    fn num_headers(&self) -> usize { 0 }
+    fn num_headers(&self) -> usize { 1 }
 
     fn process_header(&mut self, _: &[u8]) { }
     fn process_packet(&mut self, packet: &[u8], last_granule: u64) -> u64 {
@@ -190,7 +189,7 @@ impl ogg::BitstreamDecoder for CdgDecoder {
         let last_sector = last_granule >> 20;
         let last_keyframe = last_granule & 0xFFFFF;
         let mut cur_sector = 0;
-        let queue = self.queue.borrow_mut();
+        let mut queue = self.queue.borrow_mut();
         match self.header.decode_packet(packet) {
             Some((PacketType::Command, cmds)) => {
                 for sector in cmds.chunks(96) {
@@ -199,13 +198,22 @@ impl ogg::BitstreamDecoder for CdgDecoder {
                         queue.queue.push_back( ((last_sector + cur_sector) as u32, cmd) );
                     }
                 }
+                println!("Processed sector; queue at {} commands", queue.queue.len());
                 (last_sector + cur_sector) << 20 | (last_keyframe + cur_sector) & 0xFFFF
             },
             Some((PacketType::Keyframe, _)) => {
+                println!("keyframe?");
                 // We ignore the keyframe
                 last_sector & !0xFFFFF
             },
-            _ => last_granule
+            None => {
+                println!("Parse failure");
+                last_granule
+            },
+            Some((PacketType::Other(n), _)) => {
+                println!("WTF is cdg packet {}", n);
+                last_granule
+            },
         }
     }
     fn notice_gap(&mut self) {}
@@ -217,13 +225,14 @@ impl ogg::BitstreamDecoder for CdgDecoder {
 pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg::BitstreamDecoder>, types::StreamDesc<S>)> {
     use ogk::cdg::*;
     use std::default::Default;
+    use std::cell::RefCell;
     CdgHeader::from_bytes(raw_header).map(|header| {
-        let queue = Default::default();
+        let queue : CommandQueue = Default::default();
         let decoder = Box::new(CdgDecoder{
             header: header,
-            queue: queue,
+            queue: queue.clone(),
         }) as Box<ogg::BitstreamDecoder>;
-        let sd = types::StreamDesc::Video(Rc::new(CdgPlayer::new(queue)));
+        let sd = types::StreamDesc::Video(Rc::new(RefCell::new(CdgPlayer::new(queue))));
         (decoder, sd)
     })
 }

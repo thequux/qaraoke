@@ -7,7 +7,6 @@ use sample;
 use sample::signal::Signal;
 use types;
 use glium;
-use byteorder;
 
 type SampleQueue = Rc<RefCell<VecDeque<[i16;2]>>>;
 
@@ -30,7 +29,7 @@ impl Mp3Decoder {
 
 impl ogg::BitstreamDecoder for Mp3Decoder {
     fn map_granule(&self, timestamp: u64) -> u64 { 1000_000 * timestamp / self.sample_frequency }
-    fn num_headers(&self) -> usize { 1 }
+    fn num_headers(&self) -> usize { self.aux_headers + 1 }
     fn process_header(&mut self, _: &[u8]) { }
     fn process_packet(&mut self, packet: &[u8], last_granule: u64) -> u64 {
         if let Err(e) = self.decoder.feed(packet) {
@@ -46,15 +45,16 @@ impl ogg::BitstreamDecoder for Mp3Decoder {
             },
             Ok((rate, channels, nsamples)) => {
                 use sample::signal::Signal;
-                use sample::conv::FromSampleSlice;
-                if channels == 2 {
-                    self.handle_samples(sample::signal::from_interleaved_samples(buf.iter().cloned())
-                                        .from_hz_to_hz(rate as f64, 48000.))
-                } else {
-                    self.handle_samples(
-                        buf.iter().cloned().map(|x| [x;2]).from_hz_to_hz(rate as f64, 48000.)
-                    )
-                };
+                if nsamples > 0 {
+                    if channels == 2 {
+                         self.handle_samples(sample::signal::from_interleaved_samples(buf.iter().cloned())
+                                             .from_hz_to_hz(rate as f64, 48000.))
+                     } else {
+                         self.handle_samples(
+                             buf.iter().cloned().map(|x| [x;2]).from_hz_to_hz(rate as f64, 48000.)
+                         )
+                     }
+                }
             },
         };
         last_granule + 1
@@ -81,24 +81,29 @@ impl types::AudioCodec for Mp3DecoderFrontend {
 
 pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg::BitstreamDecoder>, types::StreamDesc<S>)> {
     use byteorder::{ByteOrder, LittleEndian};
+    use std::cell::RefCell;
     if &raw_header[0..9] != b"OggMP3\0\0\0" {
         return None;
     }
     let aux_headers = raw_header[11] as usize;
     let sample_freq = LittleEndian::read_u32(&raw_header[16..20]) as u64;
-    let sample_queue = Default::default();
-    
+    let sample_queue : SampleQueue = Default::default();
+
     let decoder = Box::new(Mp3Decoder{
-        sample_queue: sample_queue,
-        decoder: mpg123::Handle::new().unwrap(),
+        sample_queue: sample_queue.clone(),
+        decoder: {
+            let mut handle = mpg123::Handle::new().unwrap();
+            handle.open_feed().unwrap();
+            handle
+        },
         sample_frequency: sample_freq,
         aux_headers: aux_headers,
     }) as Box<ogg::BitstreamDecoder>;
 
     let frontend = types::StreamDesc::Audio(
-        Rc::new(Mp3DecoderFrontend{
+        Rc::new(RefCell::new(Mp3DecoderFrontend{
             sample_queue: sample_queue
-        })
+        }))
     );
 
     Some((decoder, frontend))

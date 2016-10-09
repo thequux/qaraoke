@@ -1,3 +1,5 @@
+use std::error::Error;
+use std::fmt::{self, Display};
 use std::io::{self,Write,Read};
 use std::collections;
 use rand;
@@ -13,9 +15,35 @@ pub enum StreamError {
     Codec(String),
 }
 
+impl Display for StreamError {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(fmt, "{:?}", self)
+    }
+}
+
+impl Error for StreamError {
+    fn description(&self) -> &str {
+        match *self {
+            StreamError::Io(ref err) => err.description(),
+            StreamError::Format(_, ref desc) => desc,
+            StreamError::Codec(ref desc) => desc,
+        }
+    }
+}
+
 impl From<io::Error> for StreamError {
     fn from(err: io::Error) -> Self {
         StreamError::Io(err)
+    }
+}
+
+impl Into<io::Error> for StreamError {
+    fn into(self) -> io::Error {
+        if let StreamError::Io(err) = self {
+            err
+        } else {
+            io::Error::new(io::ErrorKind::Other, self)
+        }
     }
 }
 
@@ -727,6 +755,10 @@ impl<StreamDesc> StreamMapper<StreamDesc> {
             }
         }
     }
+
+    fn lwm(&self) -> u64 {
+        self.streams.values().map(|stream| stream.decoder.map_granule(stream.hwm)).min().unwrap_or(0)
+    }
 }
 
 
@@ -779,10 +811,11 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
     
     pub fn pump_page(&mut self) -> Result<(), StreamError> {
         if let Some(page) = try!(self.source.next_page()) {
-            self.mapper.handle_page(page)
-        } else {
-            Ok(())
+            let page_ser = page.stream_serial;
+            try!(self.mapper.handle_page(page));
+            println!("Pumped a page for stream {:x}", page_ser);
         }
+        Ok(())
     }
 
     pub fn streams(&self) -> DemuxStreams<StreamDesc> {
@@ -791,7 +824,7 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
 
     /// Takes time in µs
     pub fn pump_until(&mut self, time: u64) -> Result<u64, StreamError> {
-        try!(self.internal_pump_until(|ogg| ogg.mapper.hwm >= time));
+        try!(self.internal_pump_until(|ogg| ogg.mapper.lwm() >= time));
         Ok(self.mapper.hwm)
     }
 }

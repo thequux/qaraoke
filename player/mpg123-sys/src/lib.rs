@@ -36,7 +36,7 @@ extern {
     pub fn mpg123_format_all(handle: *mut Mpg123Handle) -> c_int;
     pub fn mpg123_format(handle: *mut Mpg123Handle, rate: c_int, channels: c_int, encodings: c_int) -> c_int;
     pub fn mpg123_format_support(handle: *mut Mpg123Handle, rate: c_int, encodings: c_int) -> c_int;
-    pub fn mpg123_getformat(handle: *mut Mpg123Handle, rate: *mut c_int, channels: *mut c_int, encodings: *mut c_int) -> c_int;
+    pub fn mpg123_getformat(handle: *mut Mpg123Handle, rate: *mut c_long, channels: *mut c_int, encodings: *mut c_int) -> c_int;
 
     // File input and decoding
     pub fn mpg123_open(handle: *mut Mpg123Handle, path: *const c_char) -> c_int;

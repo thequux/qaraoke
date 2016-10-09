@@ -128,22 +128,36 @@ impl <S: SampleFormat> Handle<S> {
                 match mpg123_sys::mpg123_read(self.handle, outmem, obufsize, &mut done).into() {
                     Error::Ok => break,
                     Error::NewFormat => {
-                        let mut rate = 0;
-                        let mut channels = 0;
-                        let mut encoding = 0;
-                        mpg123_sys::mpg123_getformat(self.handle, &mut rate, &mut channels, &mut encoding);
-                        assert!(Enc::from_bits(encoding).unwrap() == S::encoding());
-                        self.rate = rate as u32;
-                        self.channels = if ChannelCount::from_bits(channels).unwrap() == mpg123_sys::CHAN_MONO { 1 } else { 2 };
+                        self.update_format();
                         continue;
                     },
                     Error::NeedMore => break,
-                    err => return Err(err),
+                    Error::Err => return Err(mpg123_sys::mpg123_errcode(self.handle)),
+                    err => return Err(err.into()),
                 }
             }
+            if self.rate == 0 && done != 0 {
+                self.update_format();
+            }
             let samples = done as usize / samplesize as usize;
+            //println!("Got {} samples", samples);
             Ok((self.rate, self.channels, samples))
         }
+    }
+
+    fn update_format(&mut self) {
+        let mut rate = 0;
+        let mut channels = 0;
+        let mut encoding = 0;
+        unsafe {
+            mpg123_sys::mpg123_getformat(self.handle, &mut rate, &mut channels, &mut encoding);
+        }
+        if self.rate != 0 {
+            assert!(Enc::from_bits(encoding).unwrap() == S::encoding());
+        }
+        println!("Format set to {}/{}/{:?}", rate, channels, encoding);
+        self.rate = rate as u32;
+        self.channels = if ChannelCount::from_bits(channels).unwrap() == mpg123_sys::CHAN_MONO { 1 } else { 2 };
     }
 }
 

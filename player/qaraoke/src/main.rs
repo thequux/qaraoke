@@ -12,13 +12,17 @@ extern crate byteorder;
 // Import codecs
 mod codec;
    
-use std::borrow::Cow;
+use std::cell::RefCell;
+use std::error::Error;
 use std::rc::Rc;
+
+use glium::backend::Facade;
 
 
 pub mod types {
     use glium;
     use std::rc::Rc;
+    use std::cell::RefCell;
     pub enum CodecError {
         Underrun,
     }
@@ -46,18 +50,58 @@ pub mod types {
         fn render_frame(&mut self, context: &Rc<glium::backend::Context>, target: &mut Surface, when: u32);
     }
 
+    #[derive(Clone)]
     pub enum StreamDesc<Surface> {
-        Audio(Rc<AudioCodec>),
-        Video(Rc<VideoCodec<Surface>>),
+        Audio(Rc<RefCell<AudioCodec>>),
+        Video(Rc<RefCell<VideoCodec<Surface>>>),
     }
+}
+
+struct KaraokeSource<R, S> {
+    demux: ogk::ogg::OggDemux<R, types::StreamDesc<S>>,
+    audio: Option<Rc<RefCell<types::AudioCodec>>>,
+    video: Option<Rc<RefCell<types::VideoCodec<S>>>>,
+}
+
+impl <R: std::io::Read, S: glium::Surface + 'static> KaraokeSource<R, S> {
+    pub fn from_stream(reader: R) -> Result<Self, Box<Error>> {
+        use types::StreamDesc;
+        let mut source = KaraokeSource{
+            demux: try!(ogk::ogg::OggDemux::new(reader, codec::identify_header)),
+            audio: None,
+            video: None,
+        };
+        for (_stream_id, stream) in source.demux.streams() {
+            match stream {
+                &StreamDesc::Audio(ref stream) => {
+                    source.audio = Some(source.audio.map_or_else(
+                        || stream.clone(),
+                        |old_stream| if (*old_stream).borrow().quality() < (**stream).borrow().quality() {
+                            stream.clone()
+                        } else {
+                            old_stream
+                        }
+                    ));
+                },
+                &StreamDesc::Video(ref stream) => {
+                    // TODO: Provide some way to decide between codecs
+                    source.video = Some(stream.clone());
+                }
+            }
+        }
+
+        Ok(source)
+    }
+    
 }
 
 // TODO: Add glium_pib for bare metal Raspberry Pi support
 
 fn main() {
+    use std::fs;
     let args: Vec<String> = std::env::args().collect();
     let filename = args.get(1).expect("Usage: $0 filename");
-    let player = unsafe { std::mem::uninitialized() };
+    let mut player = KaraokeSource::from_stream(fs::File::open(filename).unwrap()).unwrap();
     use glium::DisplayBuild;
 
     let display = glium::glutin::WindowBuilder::new().build_glium().unwrap();
@@ -66,14 +110,21 @@ fn main() {
     let mut fps = fps_counter::FPSCounter::new();
     let start_time = std::time::Instant::now();
 
+    if let Some(ref vcodec) = player.video {
+        vcodec.borrow_mut().initialize(display.get_context())
+    }
+    
     loop {
         // Do updates
         let playtime = std::time::Instant::now().duration_since(start_time);
-        player.update((playtime.as_secs() * 1000) as u32 + playtime.subsec_nanos() / 1000000);
-        let mut target = display.draw();
-        player.render_frame(target);
-        target.finish().unwrap();
-        
+        let time_ms = (playtime.as_secs() * 1000) as u32 + playtime.subsec_nanos() / 1000_000;
+        if let Some(ref vcodec) = player.video {
+            let mut target = display.draw();
+            vcodec.borrow_mut().render_frame(display.get_context(), &mut target, time_ms);
+            target.finish().unwrap();
+        }
+
+        player.demux.pump_until(time_ms as u64 * 1000 + 1000_000);
         // Handle events
         for ev in display.poll_events() {
             match ev {
