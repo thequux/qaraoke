@@ -5,66 +5,63 @@ extern crate glium;
 extern crate image;
 extern crate fps_counter;
 extern crate ogk;
+extern crate mpg123;
+extern crate sample;
+extern crate byteorder;
+
+// Import codecs
+mod codec;
+   
 use std::borrow::Cow;
+use std::rc::Rc;
 
 
-// TODO: Add glium_pib for bare metal Raspberry Pi support
+pub mod types {
+    use glium;
+    use std::rc::Rc;
+    pub enum CodecError {
+        Underrun,
+    }
+    
+    pub trait AudioCodec {
+        /// Ranks quality of various codecs; higer is better. There's
+        /// no scale to this number.  As a rough guide, this should be
+        /// the number of bits of entropy per second, adjusted by the
+        /// quality of the codec, where Opus is the reference.
+        ///
+        /// As this is not well-defined, wing it as best you can.
+        fn quality(&self) -> u32;
 
-#[derive(Copy,Clone)]
-struct Vertex {
-    position: [f32; 2],
-    tex_coords: [f32; 2],
+        /// Retrieve 48kHz, signed 16 bit samples in interleaved stereo.
+        /// If you can't fill the buffer, return underrun.
+        fn get_samples(&mut self, buffer: &mut [[i16;2]]) -> Result<(), CodecError>;
+    }
+
+    pub trait VideoCodec<Surface: glium::Surface> {
+        /// Do pre-playback initialization. Compile shaders, set up
+        /// textures, etc.
+        fn initialize(&mut self, context: &Rc<glium::backend::Context>);
+        /// Render a frame. initialize will be called first.
+        /// when is measured in milliseconds since the start of playback.
+        fn render_frame(&mut self, context: &Rc<glium::backend::Context>, target: &mut Surface, when: u32);
+    }
+
+    pub enum StreamDesc<Surface> {
+        Audio(Rc<AudioCodec>),
+        Video(Rc<VideoCodec<Surface>>),
+    }
 }
 
-implement_vertex!(Vertex, position, tex_coords);
+// TODO: Add glium_pib for bare metal Raspberry Pi support
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let filename = args.get(1).expect("Usage: $0 filename");
-    let mut player = CdgPlayer::new(filename).unwrap();
+    let player = unsafe { std::mem::uninitialized() };
     use glium::DisplayBuild;
 
     let display = glium::glutin::WindowBuilder::new().build_glium().unwrap();
-    let billboard_vtx = [
-        // Note that the texture coordinates are inverted from GL coordinates
-        // you'd expect; this puts 0,0 at the top left corner
-        Vertex{position: [-0.5, -0.5], tex_coords: [0.0, 1.0]},
-        Vertex{position: [-0.5,  0.5], tex_coords: [0.0, 0.0]},
-        Vertex{position: [ 0.5,  0.5], tex_coords: [1.0, 0.0]},
-        Vertex{position: [ 0.5, -0.5], tex_coords: [1.0, 1.0]},
-    ];
-
-    let vertex_buffer = glium::VertexBuffer::new(&display, &billboard_vtx).unwrap();
-    let indices = glium::index::NoIndices(glium::index::PrimitiveType::TriangleFan);
-
-    let vertex_shader_src = r#"
-    #version 140
-
-    in vec2 position;
-    in vec2 tex_coords;
-    out vec2 v_tex_coords;
-
-    void main() {
-        gl_Position = vec4(position, 0.0, 1.0);
-        v_tex_coords = tex_coords;
-    }
-"#;
-
-    let fragment_shader_src = r#"
-    #version 140
-
-    in vec2 v_tex_coords;
-    out vec4 color;
-
-    uniform sampler2D tex;
-
-    void main() {
-        color = texture(tex, v_tex_coords);
-    }
-"#;
-
-    let program = glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None).unwrap();
-    
+   
     let mut frame_count = 0;
     let mut fps = fps_counter::FPSCounter::new();
     let start_time = std::time::Instant::now();
@@ -73,27 +70,10 @@ fn main() {
         // Do updates
         let playtime = std::time::Instant::now().duration_since(start_time);
         player.update((playtime.as_secs() * 1000) as u32 + playtime.subsec_nanos() / 1000000);
-        let player_image = player.render();
-
-        // Render
-        use glium::Surface;
         let mut target = display.draw();
-        target.clear_color(0.0, 0.0, 1.0, 1.0);
-
-        let glimage = glium::texture::RawImage2d{
-            data: Cow::Borrowed(player_image),
-            width: 300,
-            height: 216,
-            format: glium::texture::ClientFormat::U8U8U8U8,
-        };
-        //let glimage = glium::texture::RawImage2d::from_raw_rgba_reversed(image.into_raw(), (300,216));
-        let texture = glium::texture::Texture2d::new(&display, glimage).unwrap();
-        let uniforms = uniform!{
-            tex: texture.sampled().magnify_filter(glium::uniforms::MagnifySamplerFilter::Nearest),
-        };
-        target.draw(&vertex_buffer, &indices, &program, &uniforms, &Default::default()).unwrap();
+        player.render_frame(target);
         target.finish().unwrap();
-
+        
         // Handle events
         for ev in display.poll_events() {
             match ev {
@@ -106,56 +86,5 @@ fn main() {
         if frame_count % 100 == 0 {
             display.get_window().map(|win| win.set_title(&format!("{} fps", fps_c)));
         }
-    }
-}
-
-struct CdgPlayer {
-    cdg_stream: cdg::SubchannelStreamIter<Box<std::io::Read>>,
-    interp: cdg_renderer::CdgInterpreter,
-
-    current_sector: u32,
-    finished: bool,
-
-    out_buffer: image::RgbaImage,
-}
-
-
-impl CdgPlayer {
-    fn new(filename: &str) -> std::io::Result<Self> {
-        let file = Box::new(try!(std::fs::File::open(filename)));
-        
-        Ok(CdgPlayer{
-            cdg_stream: cdg::SubchannelStreamIter::new(file),
-            interp: cdg_renderer::CdgInterpreter::new(),
-
-            current_sector: 0,
-            finished: false,
-
-            out_buffer: image::RgbaImage::new(300,216),
-        })
-    }
-
-    /// Update playback to time `time`, measured in milliseconds since
-    /// start of playback.
-    /// # Returns
-    /// 
-    fn update(&mut self, time: u32) {
-        let target_sector = time * 3 / 40;
-        while self.current_sector < target_sector && !self.finished {
-            if let Some(cmds) = self.cdg_stream.next() {
-                for cmd in cmds {
-                    self.interp.handle_cmd(cmd)
-                }
-            } else {
-                self.finished = true;
-            }
-            self.current_sector += 1;
-        }
-    }
-
-    fn render(&mut self) -> &image::RgbaImage {
-        use image::GenericImage;
-        self.out_buffer.copy_from(&self.interp, 0,0);
-        &self.out_buffer
     }
 }

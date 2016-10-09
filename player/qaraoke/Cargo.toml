@@ -1,14 +1,21 @@
 [package]
+authors = ["TQ Hirsch <thequux@thequux.com>"]
 name = "qaraoke"
 version = "0.1.0"
-authors = ["TQ Hirsch <thequux@thequux.com>"]
 
 [dependencies]
+byteorder = "0.5.3"
 cdg = "0.1"
 cdg_renderer = "0.1"
-glium = "0.15"
 clap = "2.12"
-image = "0.10"
 fps_counter = "0.2"
-portaudio = "0.7" 
-ogk = {path="../../tools/ogk"}
+glium = "0.15"
+image = "0.10"
+portaudio = "0.7"
+sample = "0.6.2"
+
+[dependencies.mpg123]
+path = "../mpg123"
+
+[dependencies.ogk]
+path = "../../tools/ogk"

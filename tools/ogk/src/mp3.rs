@@ -1,5 +1,7 @@
 use std::io::prelude::*;
 use std::io;
+use std::cell::RefCell;
+use std::collections::VecDeque;
 
 use ogg;
 use util;
@@ -253,4 +255,3 @@ impl <R: Read> ogg::BitstreamCoder for OggMP3Coder<R> {
         timestamp * 1000_000 / self.sample_frequency as u64
     }
 }
-

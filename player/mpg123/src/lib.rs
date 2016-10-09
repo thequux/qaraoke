@@ -115,7 +115,9 @@ impl <S: SampleFormat> Handle<S> {
     /// buffer.  Returns the sample rate, the number of channels (1 or
     /// 2), and the number of samples read.
     ///
-    /// Note that, when there are two output channels, a "sample" consists of a pair of values.
+    /// Note that the term "sample" is ambiguous in audio processing;
+    /// here we use it to mean a single value in outbuf, regardless of
+    /// the number of channels.
     pub fn shit(&mut self, outbuf: &mut [S]) -> Result<(u32, u32, usize), Error> {
         unsafe {
             let outmem = outbuf.as_ptr() as *mut u8;
@@ -139,7 +141,7 @@ impl <S: SampleFormat> Handle<S> {
                     err => return Err(err),
                 }
             }
-            let samples = done as usize / samplesize as usize / self.channels as usize;
+            let samples = done as usize / samplesize as usize;
             Ok((self.rate, self.channels, samples))
         }
     }

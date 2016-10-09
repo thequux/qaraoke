@@ -495,7 +495,7 @@ impl OgkMux {
 // Demuxer
 
 pub trait BitstreamDecoder {
-    /// Map a granule position to a timestamp
+    /// Map a granule position to a timestamp, in µs
     fn map_granule(&self, u64) -> u64;
 
     /// Returns the total number of headers in the stream

@@ -13,7 +13,7 @@ author: TQ Hirsch <thequux@thequux.com>
 |      8 |      1 | Format major version (0)         |
 |      9 |      1 | Format minor version (0)         |
 |     10 |      1 | Compression method               |
-|     11 |      1 | Sectors per packet               |
+|     11 |      1 | Sectors per packet - 1           |
 
 ## Compression methods
 
