@@ -1,29 +1,32 @@
 use ogk::ogg;
 use mpg123;
-use std::collections::VecDeque;
-use std::cell::RefCell;
-use std::rc::Rc;
 use sample;
 use sample::signal::Signal;
 use types;
 use glium;
-
-type SampleQueue = Rc<RefCell<VecDeque<[i16;2]>>>;
+use std::sync::mpsc;
 
 struct Mp3Decoder {
-    sample_queue: SampleQueue,
+    queue_sender: mpsc::Sender<types::AudioBlock>,
     decoder: mpg123::Handle<i16>,
     sample_frequency: u64,
     aux_headers: usize,
 }
 
 struct Mp3DecoderFrontend {
-    sample_queue: SampleQueue,
+    receiver: Option<mpsc::Receiver<types::AudioBlock>>,
 }
 
 impl Mp3Decoder {
     fn handle_samples<S: Signal<Item=[i16;2]>>(&mut self, signal: S) {
-        self.sample_queue.borrow_mut().extend(signal)
+        use std::iter::FromIterator;
+        // I really give no shits whether the samples actually arrive,
+        // because the only reason they wouldn't is that the playback
+        // stream has moved on, in which case this file isn't going to
+        // get decoded much longer.
+        self.queue_sender.send(types::AudioBlock{
+            block: Vec::from_iter(signal),
+        }).ok();
     }
 }
 
@@ -65,32 +68,23 @@ impl ogg::BitstreamDecoder for Mp3Decoder {
 }
 
 impl types::AudioCodec for Mp3DecoderFrontend {
-    fn quality(&self) -> u32 { 32768 }
-    fn get_samples(&mut self, buffer: &mut [[i16;2]]) -> Result<(), types::CodecError> {
-        let mut queue = self.sample_queue.borrow_mut();
-        for pos in buffer.iter_mut() {
-            if let Some(s) = queue.pop_front() {
-                *pos = s;
-            } else {
-                return Err(types::CodecError::Underrun);
-            }
-        }
-        Ok(())
+    fn quality(&self) -> u32 { 240_000 }
+    fn take_sample_queue(&mut self) -> Option<mpsc::Receiver<types::AudioBlock>> {
+        return self.receiver.take()
     }
 }
 
 pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg::BitstreamDecoder>, types::StreamDesc<S>)> {
     use byteorder::{ByteOrder, LittleEndian};
-    use std::cell::RefCell;
     if &raw_header[0..9] != b"OggMP3\0\0\0" {
         return None;
     }
     let aux_headers = raw_header[11] as usize;
     let sample_freq = LittleEndian::read_u32(&raw_header[16..20]) as u64;
-    let sample_queue : SampleQueue = Default::default();
+    let (sq_sender, sq_receiver) = mpsc::channel();
 
     let decoder = Box::new(Mp3Decoder{
-        sample_queue: sample_queue.clone(),
+        queue_sender: sq_sender,
         decoder: {
             let mut handle = mpg123::Handle::new().unwrap();
             handle.open_feed().unwrap();
@@ -101,8 +95,8 @@ pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg
     }) as Box<ogg::BitstreamDecoder>;
 
     let frontend = types::StreamDesc::Audio(
-        Rc::new(RefCell::new(Mp3DecoderFrontend{
-            sample_queue: sample_queue
+        Some(Box::new(Mp3DecoderFrontend{
+            receiver: Some(sq_receiver),
         }))
     );
 

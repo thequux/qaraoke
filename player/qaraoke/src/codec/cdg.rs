@@ -99,7 +99,6 @@ pub struct CdgPlayer {
     interp: cdg_renderer::CdgInterpreter,
 
     current_sector: u32,
-    finished: bool,
 
     out_buffer: image::RgbaImage,
     render_resources: Option<CdgPlayerRsrc>,
@@ -113,7 +112,6 @@ impl CdgPlayer {
             interp: cdg_renderer::CdgInterpreter::new(),
 
             current_sector: 0,
-            finished: false,
 
             out_buffer: image::RgbaImage::new(300,216),
             render_resources: None,
@@ -225,14 +223,13 @@ impl ogg::BitstreamDecoder for CdgDecoder {
 pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg::BitstreamDecoder>, types::StreamDesc<S>)> {
     use ogk::cdg::*;
     use std::default::Default;
-    use std::cell::RefCell;
     CdgHeader::from_bytes(raw_header).map(|header| {
         let queue : CommandQueue = Default::default();
         let decoder = Box::new(CdgDecoder{
             header: header,
             queue: queue.clone(),
         }) as Box<ogg::BitstreamDecoder>;
-        let sd = types::StreamDesc::Video(Rc::new(RefCell::new(CdgPlayer::new(queue))));
+        let sd = types::StreamDesc::Video(Some(Box::new(CdgPlayer::new(queue))));
         (decoder, sd)
     })
 }

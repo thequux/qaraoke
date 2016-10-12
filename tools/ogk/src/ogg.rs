@@ -759,6 +759,10 @@ impl<StreamDesc> StreamMapper<StreamDesc> {
     fn lwm(&self) -> u64 {
         self.streams.values().map(|stream| stream.decoder.map_granule(stream.hwm)).min().unwrap_or(0)
     }
+
+    fn discard(&mut self, id: u32) {
+        self.discard_streams.insert(id);
+    }
 }
 
 
@@ -818,8 +822,8 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
         Ok(())
     }
 
-    pub fn streams(&self) -> DemuxStreams<StreamDesc> {
-        DemuxStreams(self.mapper.streams.iter())
+    pub fn streams<'a>(&'a mut self) -> DemuxStreams<StreamDesc> {
+        DemuxStreams(self.mapper.streams.iter_mut())
     }
 
     /// Takes time in µs
@@ -827,15 +831,19 @@ impl <R: Read, StreamDesc> OggDemux<R, StreamDesc> {
         try!(self.internal_pump_until(|ogg| ogg.mapper.lwm() >= time));
         Ok(self.mapper.hwm)
     }
+
+    pub fn ignore_stream(&mut self, id: u32) {
+        self.mapper.discard(id)
+    }
 }
 
-pub struct DemuxStreams<'a, Desc: 'a>(collections::hash_map::Iter<'a, u32, StreamState<Desc>>);
+pub struct DemuxStreams<'a, Desc: 'a>(collections::hash_map::IterMut<'a, u32, StreamState<Desc>>);
 
 impl <'a, Desc> Iterator for DemuxStreams<'a, Desc> {
-    type Item = (u32, &'a Desc);
+    type Item = (u32, &'a mut Desc);
 
-    fn next(&mut self) -> Option<(u32, &'a Desc)> {
-        self.0.next().map(|(id,state)| (*id, &state.user_data))
+    fn next(&mut self) -> Option<(u32, &'a mut Desc)> {
+        self.0.next().map(|(id,state)| (*id, &mut state.user_data))
     }
 }
 
