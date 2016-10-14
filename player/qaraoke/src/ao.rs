@@ -19,15 +19,20 @@ Drivers are guaranteed to
 
 use portaudio;
 use types;
+use std::cell::Cell;
 use std::sync::mpsc;
 use std::sync::atomic;
 use std::sync::Arc;
+use crossbeam::sync::AtomicOption;
+use std::ptr;
+
+pub type Stream = Option<mpsc::Receiver<types::AudioBlock>>;
 
 #[derive(Debug)]
 enum DriverCommand {
     /// Change to a new stream. If the argument is None, plays silence
     /// at the last played sample value.
-    ChangeStream(Option<mpsc::Receiver<types::AudioBlock>>),
+    ChangeStream(Stream),
 
     /// Resets the time counter to 0
     ZeroTime,
@@ -45,13 +50,17 @@ enum DriverCommand {
     Nop, 
 }
 
-struct DriverSharedState {
-    // The high 16 bits of this are a command ID; the rest is the time from the last ResetTime command in µs
-    time: atomic::AtomicUsize,    
+#[derive(Copy,Clone,Debug,PartialEq,Eq)]
+pub struct AoStatus {
+    // Guard 1 is incremented before writing to last_command or
+    // timestamp, and guard2 is incremented after. Both are
+    // initialized to 0.
+    pub last_command: u16,
+    pub timestamp: u64,
 }
 
 struct DriverBackend {
-    shared: Arc<DriverSharedState>,
+    shared: Arc<AtomicOption<AoStatus>>,
     /// The command queue is guaranteed to be able to hold exactly one
     /// of each type of deferred command. Later instances of a command replace earlier ones.
     deferred_commands: [DriverCommand; 2],
@@ -64,7 +73,7 @@ struct DriverBackend {
     
     command_queue: mpsc::Receiver<DriverCommand>,
 
-    current_stream: Option<mpsc::Receiver<types::AudioBlock>>,
+    current_stream: Stream,
 
     last_sample: types::Sample,
 
@@ -74,12 +83,14 @@ struct DriverBackend {
 }
 
 pub struct DriverFrontend {
-    shared: Arc<DriverSharedState>,
+    shared: Arc<AtomicOption<AoStatus>>,
+    cached_state: AoStatus,
     command_queue: mpsc::Sender<DriverCommand>,
+    last_cmd_sent: u16,
 }
 
 impl DriverBackend {
-    fn new(shared: Arc<DriverSharedState>, queue: mpsc::Receiver<DriverCommand>) -> Self {
+    fn new(shared: Arc<AtomicOption<AoStatus>>, queue: mpsc::Receiver<DriverCommand>) -> Self {
         let mut backend = DriverBackend{
             shared: shared,
             deferred_commands: Self::default_deferred_commands(),
@@ -101,7 +112,6 @@ impl DriverBackend {
         while let Ok(command) = self.command_queue.try_recv() {
             self.receive_command(command, time);
         }
-        
     }
 
     fn receive_command(&mut self, command: DriverCommand, time: f64) {
@@ -134,6 +144,21 @@ impl DriverBackend {
         }
     }
 
+    fn set_time(&mut self, time: f64) {
+        let timecode = 
+            if self.current_stream.is_none() {
+                !0
+            } else {
+                (time * 1000_000. + 0.5) as u64
+            };
+        let last_cmd = self.command_id;
+
+        self.shared.swap(AoStatus{
+            last_command: last_cmd,
+            timestamp: timecode,
+        }, atomic::Ordering::Release);
+    }
+    
     fn signal(&mut self) -> Iter {
         Iter{
             backend: self,
@@ -182,3 +207,57 @@ impl <'a> Iterator for Iter<'a> {
         return None;
     }
 }
+
+impl DriverFrontend {
+    fn new(shared: Arc<AtomicOption<AoStatus>>, queue: mpsc::Sender<DriverCommand>) -> Self {
+        DriverFrontend {
+            shared: shared,
+            cached_state: AoStatus{
+                last_command: 0,
+                timestamp: !0,
+            },
+            command_queue: queue,
+            last_cmd_sent: 0,
+        }
+    }
+
+    /// Changes the current stream to the provided stream, or returns
+    /// it if the output driver has failed.
+    pub fn change_stream(&mut self, stream: Stream) -> Result<(), Stream> {
+        self.command_queue.send(DriverCommand::ChangeStream(stream))
+            .map_err(|msg|
+                     if let mpsc::SendError(DriverCommand::ChangeStream(stream)) = msg {
+                         stream
+                     } else {
+                         None
+                     })
+    }
+
+    pub fn zero_time(&mut self) -> Result<(), ()> {
+        self.command_queue.send(DriverCommand::ZeroTime)
+            .map_err(|_| ())
+    }
+
+    pub fn commit(&mut self) -> Result<(), ()> {
+        self.last_cmd_sent += 1;
+        self.command_queue.send(DriverCommand::Commit(self.last_cmd_sent))
+            .map_err(|_| ())
+    }
+
+    fn current_status(&mut self) -> AoStatus {
+        if let Some(state) = self.shared.take(atomic::Ordering::Acquire) {
+            self.cached_state = state;
+        }
+        self.cached_state
+    }
+    
+    pub fn all_commands_processed(&mut self) -> bool {
+        self.current_status().last_command == self.last_cmd_sent
+    }
+
+    pub fn timestamp(&mut self) -> u64 {
+        self.current_status().timestamp
+    }
+}
+
+

@@ -9,10 +9,12 @@ extern crate mpg123;
 extern crate ogk;
 extern crate portaudio;
 extern crate sample;
+extern crate crossbeam;
 
 // Import codecs
 mod codec;
-   
+mod ao;
+
 use std::error::Error;
 
 use glium::backend::Facade;
@@ -23,14 +25,16 @@ pub mod types {
     use std::rc::Rc;
     use std::sync::mpsc;
 
+    pub type Sample = [i16; 2];
+
     pub struct AudioBlock {
-        pub block: Vec<[i16;2]>,
+        pub block: Vec<Sample>,
     }
-    
+
     pub enum CodecError {
         Underrun,
     }
-    
+
     pub trait AudioCodec {
         /// Ranks quality of various codecs; higer is better. There's
         /// no scale to this number.  As a rough guide, this should be
@@ -116,7 +120,7 @@ impl <R: std::io::Read, S: glium::Surface + 'static> KaraokeSource<R, S> {
         }
         Ok(source)
     }
-    
+
 }
 
 // TODO: Add glium_pib for bare metal Raspberry Pi support
@@ -129,17 +133,17 @@ fn main() {
     use glium::DisplayBuild;
 
     let display = glium::glutin::WindowBuilder::new().build_glium().unwrap();
-   
+
     let mut frame_count = 0;
     let mut fps = fps_counter::FPSCounter::new();
     let start_time = std::time::Instant::now();
 
-    
-    
+
+
     if let Some(ref mut vcodec) = player.video {
         vcodec.initialize(display.get_context())
     }
-    
+
     loop {
         // Do updates
         let playtime = std::time::Instant::now().duration_since(start_time);
