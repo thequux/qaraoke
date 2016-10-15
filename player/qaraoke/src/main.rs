@@ -12,6 +12,7 @@ extern crate sample;
 extern crate crossbeam;
 
 // Import codecs
+pub mod rt;
 mod codec;
 mod ao;
 
