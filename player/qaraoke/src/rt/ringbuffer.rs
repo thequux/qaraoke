@@ -20,7 +20,7 @@ pub enum Error {
 
 /// This is the ringbuffer internals; it doesn't enforce any
 /// concurrency restrictions. Thus, only Reader and Writer are exposed
-/// outside this class.
+/// outside this module.
 ///
 /// Invariants:
 ///   * capacity is one less than a power of two
