@@ -17,16 +17,15 @@ Drivers are guaranteed to
 */
 
 
-use portaudio;
 use types;
-use std::cell::Cell;
-use std::sync::mpsc;
+use std::error::Error;
 use std::sync::atomic;
 use std::sync::Arc;
-use crossbeam::sync::AtomicOption;
-use std::ptr;
+use rt::AtomicOption;
+use rt;
 
-pub type Stream = Option<mpsc::Receiver<types::AudioBlock>>;
+
+pub type Stream = Option<rt::ringbuffer::Reader<types::Sample>>;
 
 #[derive(Debug)]
 enum DriverCommand {
@@ -59,7 +58,7 @@ pub struct AoStatus {
     pub timestamp: u64,
 }
 
-struct DriverBackend {
+pub struct DriverBackend {
     shared: Arc<AtomicOption<AoStatus>>,
     /// The command queue is guaranteed to be able to hold exactly one
     /// of each type of deferred command. Later instances of a command replace earlier ones.
@@ -71,26 +70,21 @@ struct DriverBackend {
     /// The ID of the last Commit command
     command_id: u16,
     
-    command_queue: mpsc::Receiver<DriverCommand>,
+    command_queue: rt::ringbuffer::Reader<DriverCommand>,
 
     current_stream: Stream,
-
-    last_sample: types::Sample,
-
-    deferred_samples: Vec<types::Sample>,
-
-    deferred_sample_offset: usize,
 }
 
 pub struct DriverFrontend {
     shared: Arc<AtomicOption<AoStatus>>,
     cached_state: AoStatus,
-    command_queue: mpsc::Sender<DriverCommand>,
+    command_queue: rt::ringbuffer::Writer<DriverCommand>,
     last_cmd_sent: u16,
+    driver: self::pa::Driver,
 }
 
 impl DriverBackend {
-    fn new(shared: Arc<AtomicOption<AoStatus>>, queue: mpsc::Receiver<DriverCommand>) -> Self {
+    fn new(shared: Arc<AtomicOption<AoStatus>>, queue: rt::ringbuffer::Reader<DriverCommand>) -> Self {
         let mut backend = DriverBackend{
             shared: shared,
             deferred_commands: Self::default_deferred_commands(),
@@ -98,18 +92,18 @@ impl DriverBackend {
             command_id: 0,
             command_queue: queue,
             current_stream: None,
-            last_sample: [0;2],
-            deferred_samples: Vec::new(),
-            deferred_sample_offset: 0,
         };
         backend.receive_command(DriverCommand::ZeroTime, 0.);
         backend
     }
 
-    /// This time value is in seconds since some arbitrary epoch. 
-    fn produce_samples(&mut self, time: f64, outbuf: &mut [i32]) {
+    /// This time value is in seconds since some arbitrary epoch.
+    fn handle_commands(&mut self, time: f64) {
         // Handle comands
-        while let Ok(command) = self.command_queue.try_recv() {
+
+        // TODO: Do this with less synchronization; each pop costs
+        // ~1e2 cycles
+        while let Some(command) = self.command_queue.pop() {
             self.receive_command(command, time);
         }
     }
@@ -159,57 +153,27 @@ impl DriverBackend {
         }, atomic::Ordering::Release);
     }
     
-    fn signal(&mut self) -> Iter {
-        Iter{
-            backend: self,
-            done: false,
+    fn signal(&mut self) -> DriverSignal {
+        DriverSignal{
+            iter: self.current_stream.as_mut().map(|s| s.iter()),
         }
     }
 }
 
-struct Iter<'a>{
-    backend: &'a mut DriverBackend,
-    done: bool,
+struct DriverSignal<'a> {
+    iter: Option<rt::ringbuffer::ReadIter<'a, types::Sample>>,
 }
 
-impl <'a> Iterator for Iter<'a> {
-    type Item = [i16; 2];
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let ref mut be = self.backend;
-        while !self.done {
-            if be.deferred_sample_offset < be.deferred_samples.len() {
-                be.last_sample = be.deferred_samples[be.deferred_sample_offset];
-                be.deferred_sample_offset += 1;
-                return Some(be.last_sample);
-            }
-
-            // try to read the next block.
-            let next_block = be.current_stream.as_mut()
-                // Disconnected is a NoOp for a non-existent stream
-                .map_or(Err(mpsc::TryRecvError::Disconnected),
-                        |stream| stream.try_recv());
-            match next_block {
-                Ok(chunk) => {
-                    be.deferred_samples = chunk.block;
-                    be.deferred_sample_offset = 0;
-                },
-                Err(mpsc::TryRecvError::Empty) => {
-                    self.done = true;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    be.current_stream = None;
-                    self.done = true;
-                }
-            }
-        }
-
-        return None;
+impl <'a> Iterator for DriverSignal<'a> {
+    type Item = types::Sample;
+    fn next(&mut self) -> Option<types::Sample> {
+        Some(self.iter.as_mut().and_then(|i| i.next()).unwrap_or([0.0,0.0]))
     }
 }
+
 
 impl DriverFrontend {
-    fn new(shared: Arc<AtomicOption<AoStatus>>, queue: mpsc::Sender<DriverCommand>) -> Self {
+    fn new(shared: Arc<AtomicOption<AoStatus>>, queue: rt::ringbuffer::Writer<DriverCommand>, hw: pa::Driver) -> Self {
         DriverFrontend {
             shared: shared,
             cached_state: AoStatus{
@@ -218,30 +182,28 @@ impl DriverFrontend {
             },
             command_queue: queue,
             last_cmd_sent: 0,
+            driver: hw,
         }
     }
 
     /// Changes the current stream to the provided stream, or returns
-    /// it if the output driver has failed.
+    /// it if the process fails for some reason.
     pub fn change_stream(&mut self, stream: Stream) -> Result<(), Stream> {
-        self.command_queue.send(DriverCommand::ChangeStream(stream))
-            .map_err(|msg|
-                     if let mpsc::SendError(DriverCommand::ChangeStream(stream)) = msg {
-                         stream
-                     } else {
-                         None
-                     })
+        self.command_queue.push(DriverCommand::ChangeStream(stream)).map_err(|cmd| match cmd {
+            DriverCommand::ChangeStream(stream) => stream,
+            _ => unreachable!(),
+        })
     }
 
     pub fn zero_time(&mut self) -> Result<(), ()> {
-        self.command_queue.send(DriverCommand::ZeroTime)
-            .map_err(|_| ())
+        self.command_queue.push(DriverCommand::ZeroTime).map_err(|_|())
     }
 
-    pub fn commit(&mut self) -> Result<(), ()> {
+    pub fn commit(&mut self) -> Result<u16, ()> {
         self.last_cmd_sent += 1;
-        self.command_queue.send(DriverCommand::Commit(self.last_cmd_sent))
-            .map_err(|_| ())
+        self.command_queue.push(DriverCommand::Commit(self.last_cmd_sent))
+            .map_err(|_|())
+            .map(|_| self.last_cmd_sent)
     }
 
     fn current_status(&mut self) -> AoStatus {
@@ -258,6 +220,66 @@ impl DriverFrontend {
     pub fn timestamp(&mut self) -> u64 {
         self.current_status().timestamp
     }
+
+    pub fn start(&mut self) -> Result<(), Box<Error>> {
+        self.driver.start()
+    }
 }
 
+pub fn open() -> Result<DriverFrontend, Box<Error>> {
+    let status_chan = Arc::new(AtomicOption::new());
+    let (cmd_rd, cmd_wt) = rt::ringbuffer::new(16);
+    let mut backend = DriverBackend::new(status_chan.clone(), cmd_rd);
+    let mut frontend = DriverFrontend::new(status_chan, cmd_wt, try!(pa::Driver::open(backend)));
 
+    // Initialize PortAudio
+    return Ok(frontend);
+}
+
+mod pa {
+    use portaudio;
+    use std::error::Error;
+    
+    const SAMPLE_RATE: f64 = 48_000.;
+    const FRAMES_PER_BUFFER: u32 = 64;
+    const CHANNELS: i32 = 2;
+
+    pub struct Driver {
+        pa: portaudio::PortAudio,
+        stream: portaudio::Stream<portaudio::NonBlocking, portaudio::Output<f32>>,
+    }
+
+    impl Driver {
+        pub fn open(mut backend: super::DriverBackend) -> Result<Driver, Box<Error>> {
+            let pa = try!(portaudio::PortAudio::new());
+            let mut settings = try!(pa.default_output_stream_settings(CHANNELS, SAMPLE_RATE, FRAMES_PER_BUFFER));
+            settings.flags = portaudio::stream_flags::CLIP_OFF;
+
+            let callback = move |portaudio::OutputStreamCallbackArgs{buffer, frames, time, ..}| {
+                use sample::Signal;
+                backend.handle_commands(time.buffer_dac);
+                backend.set_time(time.current);
+
+                for (dst, src) in buffer.iter_mut().zip(backend.signal().to_samples()) { 
+                    *dst = src
+                }
+
+                portaudio::Continue
+            };
+            let mut stream = try!(pa.open_non_blocking_stream(settings, callback));
+            Ok(Driver{pa: pa, stream: stream})
+        }
+
+        pub fn start(&mut self) -> Result<(), Box<Error>> {
+            try!(self.stream.start());
+            Ok(())
+        }
+
+        /// Note that this is an absolute minimum; codecs should
+        /// probably set their buffer sizes to be at least two video
+        /// frames long
+        pub fn min_buffer_size(&self) -> u32 {
+            FRAMES_PER_BUFFER * 2
+        }
+    }
+}

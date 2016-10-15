@@ -4,29 +4,62 @@ use sample;
 use sample::signal::Signal;
 use types;
 use glium;
+use rt::ringbuffer;
+use std::thread;
 use std::sync::mpsc;
+use libsoxr;
 
 struct Mp3Decoder {
-    queue_sender: mpsc::Sender<types::AudioBlock>,
-    decoder: mpg123::Handle<i16>,
+    queue_sender: mpsc::Sender<Vec<types::Sample>>,
+    decoder: mpg123::Handle<f32>,
     sample_frequency: u64,
     aux_headers: usize,
+    soxr: libsoxr::Soxr,
 }
 
 struct Mp3DecoderFrontend {
-    receiver: Option<mpsc::Receiver<types::AudioBlock>>,
+    receiver: mpsc::Receiver<Vec<types::Sample>>,
+    ringbuffer: Option<ringbuffer::Writer<types::Sample>>,
+}
+
+fn as_interlaced<T>(buf: &mut [[T; 2]]) -> &mut [T] {
+    use std::slice;
+    unsafe {
+        slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut T, buf.len() * 2)
+    }
 }
 
 impl Mp3Decoder {
-    fn handle_samples<S: Signal<Item=[i16;2]>>(&mut self, signal: S) {
-        use std::iter::FromIterator;
-        // I really give no shits whether the samples actually arrive,
-        // because the only reason they wouldn't is that the playback
-        // stream has moved on, in which case this file isn't going to
-        // get decoded much longer.
-        self.queue_sender.send(types::AudioBlock{
-            block: Vec::from_iter(signal),
-        }).ok();
+    fn handle_samples(&mut self, rate: f64, buf: &[f32]) {
+        let mut obuf : Vec<[f32;2]> = vec![[0.0;2]; (buf.len() as f64 / 2. * 48000. / rate + 0.5) as usize];
+        self.soxr.set_io_ratio(rate / 48000., 0).unwrap();
+        // This function is deceptively unsafe; regardless of type
+        // parameters, it will always use the types given in the initializer (f32/f32)
+        if let Ok((idone, odone)) = self.soxr.process::<f32,f32>(Some(buf), as_interlaced(&mut obuf[..])) {
+            if idone != buf.len() {
+                println!("soxr didn't consume entire input buffer");
+            }
+
+            obuf.truncate(odone);
+            self.queue_sender.send(obuf);
+        } else {
+            panic!("Soxr somehow failed");
+        }
+    }
+
+    fn handle_finish(&mut self) {
+        loop {
+            let mut obuf = vec![[0.;2]; 512];
+            if let Ok((idone, odone)) = self.soxr.process::<f32,f32>(None, as_interlaced(&mut obuf[..])) {
+                if odone == 0 {
+                    break;
+                }
+                obuf.truncate(odone);
+                self.queue_sender.send(obuf);
+            } else {
+                panic!("Soxr somehow failed");
+            }
+        }
     }
 }
 
@@ -35,11 +68,12 @@ impl ogg::BitstreamDecoder for Mp3Decoder {
     fn num_headers(&self) -> usize { self.aux_headers + 1 }
     fn process_header(&mut self, _: &[u8]) { }
     fn process_packet(&mut self, packet: &[u8], last_granule: u64) -> u64 {
+        
         if let Err(e) = self.decoder.feed(packet) {
             println!("Encountered mp3 error at granule {}: {:?}", last_granule, e);
         }
         // Move what data we can out
-        let mut buf : [i16;2304] = [0;2304];
+        let mut buf : [f32;2304] = [0.0;2304];
         let res = self.decoder.shit(&mut buf);
         match res {
             Err(e) => {
@@ -49,14 +83,12 @@ impl ogg::BitstreamDecoder for Mp3Decoder {
             Ok((rate, channels, nsamples)) => {
                 use sample::signal::Signal;
                 if nsamples > 0 {
-                    if channels == 2 {
-                         self.handle_samples(sample::signal::from_interleaved_samples(buf.iter().cloned())
-                                             .from_hz_to_hz(rate as f64, 48000.))
-                     } else {
-                         self.handle_samples(
-                             buf.iter().cloned().map(|x| [x;2]).from_hz_to_hz(rate as f64, 48000.)
-                         )
-                     }
+                    if channels != 2 {
+                        panic!("Output must be in stereo! Got {} channels", channels);
+                    }
+                    
+                    //let mut obuf : Vec<f32> = vec![0.0; (2304. * 48000. / rate as f64 + 0.5) as usize];
+                    self.handle_samples(rate as f64, &buf[..])
                 }
             },
         };
@@ -64,18 +96,27 @@ impl ogg::BitstreamDecoder for Mp3Decoder {
     }
 
     fn notice_gap(&mut self) {}
-    fn finish(&mut self) {}
+    fn finish(&mut self) { self.handle_finish(); }
 }
 
 impl types::AudioCodec for Mp3DecoderFrontend {
     fn quality(&self) -> u32 { 240_000 }
-    fn take_sample_queue(&mut self) -> Option<mpsc::Receiver<types::AudioBlock>> {
-        return self.receiver.take()
+
+    fn set_ringbuffer(&mut self, buffer: ringbuffer::Writer<types::Sample>) {
+        self.ringbuffer = Some(buffer);
+    }
+
+    fn min_buffer_size(&self) -> u32 { 1152 }
+
+    fn do_needful(&mut self) {
+        
     }
 }
 
 pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg::BitstreamDecoder>, types::StreamDesc<S>)> {
     use byteorder::{ByteOrder, LittleEndian};
+    use libsoxr::datatype::Datatype as DT;
+    use libsoxr::spec;
     if &raw_header[0..9] != b"OggMP3\0\0\0" {
         return None;
     }
@@ -84,6 +125,11 @@ pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg
     let (sq_sender, sq_receiver) = mpsc::channel();
 
     let decoder = Box::new(Mp3Decoder{
+        soxr: libsoxr::Soxr::create(sample_freq as f64, 48000., 2,
+                                    Some(spec::IOSpec::new(DT::Float32I, DT::Float32I)),
+                                    Some(spec::QualitySpec::new(spec::QualityRecipe::VeryHigh, spec::QualityFlags::empty())),
+                                    None).unwrap(),
+        
         queue_sender: sq_sender,
         decoder: {
             let mut handle = mpg123::Handle::new().unwrap();
@@ -96,7 +142,8 @@ pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg
 
     let frontend = types::StreamDesc::Audio(
         Some(Box::new(Mp3DecoderFrontend{
-            receiver: Some(sq_receiver),
+            receiver: sq_receiver,
+            ringbuffer: None,
         }))
     );
 

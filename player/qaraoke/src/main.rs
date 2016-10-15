@@ -1,3 +1,4 @@
+#![feature(conservative_impl_trait)]
 extern crate byteorder;
 extern crate cdg;
 extern crate cdg_renderer;
@@ -10,6 +11,7 @@ extern crate ogk;
 extern crate portaudio;
 extern crate sample;
 extern crate crossbeam;
+extern crate libsoxr;
 
 // Import codecs
 pub mod rt;
@@ -25,8 +27,9 @@ pub mod types {
     use glium;
     use std::rc::Rc;
     use std::sync::mpsc;
-
-    pub type Sample = [i16; 2];
+    use rt::ringbuffer;
+    
+    pub type Sample = [f32; 2];
 
     pub struct AudioBlock {
         pub block: Vec<Sample>,
@@ -45,12 +48,16 @@ pub mod types {
         /// As this is not well-defined, wing it as best you can.
         fn quality(&self) -> u32;
 
-        /// Pushes out blocks of 48kHz, signed 16-bit samples in
-        /// stereo, at whatever rate they come from the codec.  This
-        /// takes ownership of the receive end of the queue, and so it
-        /// MUST return Some() on the first call and None on each
-        /// subsequent call.
-        fn take_sample_queue(&mut self) -> Option<mpsc::Receiver<AudioBlock>>;
+        /// Sets the output ringbuffer, which expects to receive audio
+        /// samples at 48kHz.
+        fn set_ringbuffer(&mut self, ringbuffer::Writer<Sample>);
+
+        /// Return the size of chunks that are produced into the buffer.
+        fn min_buffer_size(&self) -> u32;
+
+        /// Fill up the output buffer as much as possible.  Must be
+        /// called at least once per buffer period.
+        fn do_needful(&mut self);
     }
 
     pub trait VideoCodec<Surface: glium::Surface> {
@@ -121,7 +128,6 @@ impl <R: std::io::Read, S: glium::Surface + 'static> KaraokeSource<R, S> {
         }
         Ok(source)
     }
-
 }
 
 // TODO: Add glium_pib for bare metal Raspberry Pi support
@@ -139,12 +145,34 @@ fn main() {
     let mut fps = fps_counter::FPSCounter::new();
     let start_time = std::time::Instant::now();
 
+    let mut ao_driver = ao::open().unwrap();
+    let mut driver_key = 0;
 
+    ao_driver.start();
+    {
+        // Set up a stream
+        if let Some(ref mut vcodec) = player.video {
+            vcodec.initialize(display.get_context())
+        }
+        if let Some(ref mut acodec) = player.audio {
+            // We cheat here and always initialize ring buffers to half a
+            // second.
+            let (rd, wr) = rt::ringbuffer::new(24000);
+            acodec.set_ringbuffer(wr);
+            ao_driver.change_stream(Some(rd));
+        } else {
+            ao_driver.change_stream(None);
+        }
 
-    if let Some(ref mut vcodec) = player.video {
-        vcodec.initialize(display.get_context())
+        ao_driver.zero_time().unwrap();
+        driver_key = ao_driver.commit().unwrap();
     }
 
+    // Wait for the driver to synchronize
+    while !ao_driver.all_commands_processed() {
+        // Do nothing
+    }
+    
     loop {
         // Do updates
         let playtime = std::time::Instant::now().duration_since(start_time);

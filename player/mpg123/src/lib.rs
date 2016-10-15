@@ -10,15 +10,6 @@ use std::sync::{Once,ONCE_INIT};
 
 static LIBRARY_START: Once = ONCE_INIT;
 
-pub enum SampleBuf {
-    Signed8(Vec<i8>),
-    Unsigned8(Vec<u8>),
-    Signed16(Vec<i16>),
-    Unsigned16(Vec<u16>),
-    Signed32(Vec<i32>),
-    Unsigned32(Vec<u32>),
-}
-
 fn init_lib() {
     LIBRARY_START.call_once(|| {
         unsafe { mpg123_sys::mpg123_init() };
@@ -59,7 +50,8 @@ impl <S: SampleFormat> Handle<S> {
         // all formats
         try!(handle.format_none());
         for rate in Self::sample_rates() {
-            try!(handle.set_formats(rate, mpg123_sys::CHAN_STEREO | mpg123_sys::CHAN_MONO, S::encoding()));
+            // Always force the output to be stereo
+            try!(handle.set_formats(rate, mpg123_sys::CHAN_STEREO, S::encoding()));
         }
         
         Ok(handle)
@@ -179,6 +171,13 @@ impl SampleFormat for i16 {
     fn encoding() -> Enc { mpg123_sys::ENC_SIGNED_16 }
 }
 
+impl SampleFormat for f32 {
+    fn encoding() -> Enc { mpg123_sys::ENC_FLOAT_32 }
+}
+
+impl SampleFormat for f64 {
+    fn encoding() -> Enc { mpg123_sys::ENC_FLOAT_64 }
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,6 +1,7 @@
 /// lock-free ringbuffer, suitable for use at realtime priority.
 
 use std::sync::atomic::{self, AtomicUsize, Ordering};
+use std::fmt;
 use std::ptr;
 use std::iter;
 use std::slice;
@@ -50,10 +51,17 @@ pub struct RingBuffer<T> {
     ref_cnt: AtomicUsize,
 }
 
+impl<T> fmt::Debug for RingBuffer<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        return f.debug_struct("RingBuffer")
+            .field("capacity", &(self.capacity + 1))
+            .field("size", &(self.size()))
+            .finish()
+    }
+}
+
 impl <T> RingBuffer<T> {
-    fn new<F>(ref_count: usize, capacity: usize, mut default: F) -> *mut Self
-        where F: FnMut() -> T
-    {
+    fn new<F>(ref_count: usize, capacity: usize) -> *mut Self {
         let mut capacity = capacity.checked_next_power_of_two().expect("Buffer size WAY too fucking large");
         if capacity < 2 {
             // 
@@ -63,12 +71,6 @@ impl <T> RingBuffer<T> {
         let buf = vec.as_mut_ptr();
         forget(vec);
         
-        // Initialize the buffer
-        for i in 0..capacity {
-            unsafe {
-                ptr::write(buf.offset(i as isize), default());
-            }
-        }
         Box::into_raw(Box::new(RingBuffer{
             capacity: capacity - 1,
             wptr: AtomicUsize::new(0),
@@ -148,8 +150,9 @@ mod view_type {
         fn base_ptr<T>(&RingBuffer<T>) -> &AtomicUsize;
         fn limit<T>(&RingBuffer<T>) -> usize;
     }
-
+    #[derive(Debug)]
     pub struct ReaderView{}
+    #[derive(Debug)]
     pub struct WriterView{}
 
     impl ViewType for ReaderView {
@@ -171,6 +174,7 @@ mod view_type {
     }
 }
 
+#[derive(Debug)]
 pub struct View<T, VT: view_type::ViewType> {
     buf: *mut RingBuffer<T>,
     _phantom: marker::PhantomData<VT>,
@@ -209,21 +213,18 @@ impl <T, VT: view_type::ViewType> View<T, VT> {
         VT::limit(unsafe{&*self.buf})
     }
 
-    pub fn get_block(&mut self, size: usize) -> Result<MutRange<T>, Error> {
-        try!(self.check_connected());
-        let buf = unsafe{&*self.buf};
-        if size > buf.capacity {
-            return Err(Error::ItWontFit);
-        } else if size > VT::limit(buf) {
-            return Err(Error::NoMore);
-        } else {
-            let bptr = VT::base_ptr(buf).load(Ordering::Acquire);
-            return Ok(MutRange{
-                segments: unsafe{buf.get_range(bptr, size)},
-                bound_var: VT::base_ptr(buf),
-                new_val: (bptr + size) & buf.capacity,
-            })
-        }
+    fn ptr_iter(&mut self) -> PtrIter<T> {
+        let buf : &RingBuffer<T> = unsafe{&*self.buf};
+        let base_ptr = VT::base_ptr(buf);
+        atomic::fence(Ordering::Acquire);
+        let base = base_ptr.load(Ordering::Relaxed);
+        let limit = VT::limit(buf);
+        PtrIter{
+            buffer: buf,
+            start: base,
+            end: (base + limit) & buf.capacity,
+            ptr: base_ptr,
+        }        
     }
 }
 
@@ -232,41 +233,107 @@ impl <T, VT: view_type::ViewType> View<T, VT> {
 pub type Reader<T> = View<T, view_type::ReaderView>;
 pub type Writer<T> = View<T, view_type::WriterView>;
 
-pub struct MutRange<'a, T: 'a>{
-    segments: (&'a mut [T], &'a mut [T]),
-    bound_var: &'a AtomicUsize,
-    new_val: usize,
-}
+impl <T> Reader<T> {
+    pub fn iter(&mut self) -> ReadIter<T> {
+        ReadIter{iter: self.ptr_iter()}
+    }
 
-impl<'a, T: 'a> MutRange<'a, T> {
-    pub fn iter(&mut self) -> MRIter<T> {
-        MRIter{iter: self.segments.0.iter_mut().chain(self.segments.1.iter_mut())}
+    pub fn pop(&mut self) -> Option<T> {
+        self.iter().next()
     }
 }
 
-impl<'a, T: 'a> Drop for MutRange<'a, T> {
+impl <T> Writer<T> {
+    pub fn extender(&mut self) -> WriteIter<T> {
+        WriteIter{iter: self.ptr_iter()}
+    }
+
+    // Returns item if there is no space
+    pub fn push(&mut self, item: T) -> Result<(), T> {
+        if let Some(v) = self.ptr_iter().next() {
+            unsafe {
+                ptr::write(v, item);
+            }
+            return Ok(());
+        } else {
+            return Err(item);
+        }
+    }
+}
+
+/// A ReadIter is equivalent to reading one element at a time from the
+/// ring buffer, but it only synchronizes on creation and destruction.
+struct PtrIter<'a, T: 'a> {
+    buffer: &'a RingBuffer<T>,
+    start: usize,
+    end: usize,
+    ptr: &'a AtomicUsize,
+}
+
+impl<'a, T: 'a> PtrIter<'a, T> {
+    fn is_done(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// Get a pointer to the next element of T, ignoring bounds check.
+    /// This function is safe IFF is_done() returns false.
+    unsafe fn unsafe_next(&mut self) -> *mut T {
+        let ret = self.buffer.buffer.offset(self.start as isize);
+        self.start = (self.start + 1) & self.buffer.capacity;
+        return ret;        
+    }
+}
+impl<'a, T: 'a> Iterator for PtrIter<'a, T> {
+    type Item = *mut T;
+    fn next(&mut self) -> Option<*mut T> {
+        if self.is_done() {
+            return None;
+        } else {
+            return Some(unsafe{self.unsafe_next()});
+        }
+    }
+
+}
+
+impl<'a, T: 'a> Drop for PtrIter<'a, T> {
     fn drop(&mut self) {
-        self.bound_var.store(self.new_val, Ordering::Release);
-    }
-
-}
-
-pub struct MRIter<'a, T: 'a> {
-    iter: iter::Chain<slice::IterMut<'a, T>,
-                      slice::IterMut<'a, T>>,
-}
-
-impl <'a, T: 'a> Iterator for MRIter<'a, T> {
-    type Item = &'a mut T;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
+        self.ptr.store(self.start, Ordering::Release);
     }
 }
 
-pub fn new<T, F>(size: usize, init: F) -> (Reader<T>, Writer<T>)
-    where F: FnMut() -> T
-{
-    let buffer = RingBuffer::new(2, size, init);
+pub struct ReadIter<'a, T: 'a> {
+    iter: PtrIter<'a, T>,
+}
+
+impl<'a, T: 'a> Iterator for ReadIter<'a, T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        return self.iter.next().map(|x| unsafe{ptr::read(x)});
+    }
+}
+
+pub struct WriteIter<'a, T: 'a> {
+    iter: PtrIter<'a, T>,
+}
+    
+impl<'a, T: 'a> iter::Extend<T> for WriteIter<'a, T> {
+    fn extend<I>(&mut self, input: I)
+        where I: IntoIterator<Item=T>
+    {
+        // It is important to make sure that the same number of
+        // elements are fetched from each iterator.
+        let mut input = input.into_iter();
+        while !self.iter.is_done() {
+            match input.next() {
+                Some(v) => unsafe{ptr::write(self.iter.unsafe_next(), v)},
+                None => return,
+            }
+        }
+    }
+}
+
+pub fn new<T>(size: usize) -> (Reader<T>, Writer<T>) {
+    let buffer = RingBuffer::new::<T>(2, size);
     (Reader{buf: buffer, _phantom: marker::PhantomData},
      Writer{buf: buffer, _phantom: marker::PhantomData})
 }

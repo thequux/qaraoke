@@ -15,6 +15,10 @@ image = "0.10"
 portaudio = "0.7"
 sample = "0.6.2"
 
+[dependencies.libsoxr]
+git = "https://github.com/lrbalt/libsoxr-rs"
+optional = false
+
 [dependencies.mpg123]
 path = "../mpg123"
 
