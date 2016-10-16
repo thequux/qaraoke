@@ -1,0 +1,8 @@
+[package]
+authors = ["TQ Hirsch <thequux@thequux.com>"]
+name = "soxr-sys"
+version = "0.1.0"
+
+[dependencies]
+bitflags = "0.7.0"
+libc = "0.2.17"

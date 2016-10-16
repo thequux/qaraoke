@@ -1,0 +1,7 @@
+[package]
+name = "soxr"
+version = "0.1.0"
+authors = ["TQ Hirsch <thequux@thequux.com>"]
+
+[dependencies]
+soxr-sys = {path="../soxr-sys"}
