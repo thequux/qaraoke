@@ -1,4 +1,3 @@
-#![feature(conservative_impl_trait)]
 extern crate byteorder;
 extern crate cdg;
 extern crate cdg_renderer;
@@ -12,6 +11,9 @@ extern crate portaudio;
 extern crate sample;
 extern crate crossbeam;
 extern crate soxr;
+
+#[cfg(feature="raspberry_pi")]
+extern crate glium_pib;
 
 // Import codecs
 pub mod rt;
@@ -137,21 +139,21 @@ impl <R: std::io::Read, S: glium::Surface + 'static> KaraokeSource<R, S> {
 
 #[cfg(feature="raspberry_pi")]
 fn pib_open_display() -> Rc<glium::backend::Context> {
+    use std::sync::Arc;
     let system = glium_pib::System::new(Default::default());
     let system = match system {
         Ok(s) => s,
         Err(_) => {
             panic!("Failed to use broadcom libraries.");
-            return None;
         }
     };
     let system = Arc::new(system);
-    let facade = glium_pib::create_window_facade(
+    let facade : Result<Rc<glium::backend::Context>,_> = glium_pib::create_window_facade(
         &system,
         &std::default::Default::default()
     );
     match facade {
-        Ok(f) => Some(f),
+        Ok(f) => f,
         Err(_) => {
             panic!("Failed to use broadcom libraries.");
         },
@@ -162,6 +164,7 @@ fn pib_open_display() -> Rc<glium::backend::Context> {
 fn pib_open_display() -> Rc<glium::backend::Context> {
     panic!("Unable to create window");
 }
+
 fn main() {
     use std::fs;
     let args: Vec<String> = std::env::args().collect();
