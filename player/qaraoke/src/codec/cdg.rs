@@ -122,8 +122,8 @@ impl CdgPlayer {
     /// start of playback.
     /// # Returns
     /// 
-    fn update(&mut self, time: u32) {
-        let target_sector = time * 3 / 40;
+    fn update(&mut self, time: f64) {
+        let target_sector = (time * 75. + 0.5) as u32;
         let mut stream = self.cdg_stream.borrow_mut();
         while self.current_sector < target_sector {
             if let Some((ts, cmd)) = stream.queue.pop_front() {
@@ -150,7 +150,7 @@ impl <S: glium::Surface> types::VideoCodec<S> for CdgPlayer {
         self.render_resources = Some(CdgPlayerRsrc::new(ctx));
     }
     
-    fn render_frame(&mut self, ctx: &Rc<glium::backend::Context>, target: &mut S, when: u32) {
+    fn render_frame(&mut self, ctx: &Rc<glium::backend::Context>, target: &mut S, when: f64) {
         self.update(when);
         self.render();
         let rsrc = self.render_resources.as_ref().unwrap();

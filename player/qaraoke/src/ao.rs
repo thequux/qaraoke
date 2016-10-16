@@ -49,13 +49,14 @@ enum DriverCommand {
     Nop, 
 }
 
-#[derive(Copy,Clone,Debug,PartialEq,Eq)]
+#[derive(Copy,Clone,Debug)]
 pub struct AoStatus {
     // Guard 1 is incremented before writing to last_command or
     // timestamp, and guard2 is incremented after. Both are
     // initialized to 0.
     pub last_command: u16,
-    pub timestamp: u64,
+    // Time, in seconds
+    pub timestamp: f64,
 }
 
 pub struct DriverBackend {
@@ -114,11 +115,17 @@ impl DriverBackend {
             DriverCommand::ChangeStream(_) => self.deferred_commands[0] = command,
             DriverCommand::ZeroTime => self.deferred_commands[1] = command,
             DriverCommand::Commit(v) => {
+                println!("Committing");
                 let mut cmdlist = replace(&mut self.deferred_commands, Self::default_deferred_commands());
                 for dcmd in cmdlist.iter_mut() {
                     self.process_command(replace(dcmd, DriverCommand::Nop), time);
                 }
+
                 self.command_id = v;
+                self.shared.swap(AoStatus{
+                    last_command: v,
+                    timestamp: self.time_base,
+                }, atomic::Ordering::Release);
             },
             DriverCommand::Abort => self.deferred_commands = Self::default_deferred_commands(),
             DriverCommand::Nop => (),
@@ -139,21 +146,6 @@ impl DriverBackend {
         }
     }
 
-    fn set_time(&mut self, time: f64) {
-        let timecode = 
-            if self.current_stream.is_none() {
-                !0
-            } else {
-                (time * 1000_000. + 0.5) as u64
-            };
-        let last_cmd = self.command_id;
-
-        self.shared.swap(AoStatus{
-            last_command: last_cmd,
-            timestamp: timecode,
-        }, atomic::Ordering::Release);
-    }
-    
     fn signal(&mut self) -> DriverSignal {
         DriverSignal{
             iter: self.current_stream.as_mut().map(|s| s.iter()),
@@ -191,7 +183,7 @@ impl DriverFrontend {
             shared: shared,
             cached_state: AoStatus{
                 last_command: 0,
-                timestamp: !0,
+                timestamp: 0.,
             },
             command_queue: queue,
             last_cmd_sent: 0,
@@ -230,8 +222,8 @@ impl DriverFrontend {
         self.current_status().last_command == self.last_cmd_sent
     }
 
-    pub fn timestamp(&mut self) -> u64 {
-        self.current_status().timestamp
+    pub fn timestamp(&mut self) -> f64 {
+        self.driver.time() - self.current_status().timestamp
     }
 
     pub fn start(&mut self) -> Result<(), Box<Error>> {
@@ -252,33 +244,44 @@ pub fn open() -> Result<DriverFrontend, Box<Error>> {
 mod pa {
     use portaudio;
     use std::error::Error;
+    use std::time;
     
     const SAMPLE_RATE: f64 = 48_000.;
     const FRAMES_PER_BUFFER: u32 = 64;
     const CHANNELS: i32 = 2;
 
+    fn override_time(base: time::Instant, _: f64) -> f64 {
+        let now = time::Instant::now() - base;
+        now.as_secs() as f64 + (now.subsec_nanos() as f64) / 1000_000_000.
+    }
+    
     pub struct Driver {
         pa: portaudio::PortAudio,
         stream: portaudio::Stream<portaudio::NonBlocking, portaudio::Output<f32>>,
+        base: time::Instant,
     }
 
     impl Driver {
+        pub fn time(&self) -> f64 {
+            override_time(self.base, self.stream.time())
+        }
         pub fn open(mut backend: super::DriverBackend) -> Result<Driver, Box<Error>> {
             let pa = try!(portaudio::PortAudio::new());
             let mut settings = try!(pa.default_output_stream_settings(CHANNELS, SAMPLE_RATE, FRAMES_PER_BUFFER));
             settings.flags = portaudio::stream_flags::CLIP_OFF;
+            let base_time = time::Instant::now();
 
             let callback = move |portaudio::OutputStreamCallbackArgs{buffer, frames, time, ..}| {
                 use sample::Signal;
-                backend.handle_commands(time.buffer_dac);
-                backend.set_time(time.current);
+                backend.handle_commands(override_time(base_time, time.buffer_dac));
+                //println!("now: {}", time.buffer_dac);
                 for (dst, src) in buffer.iter_mut().zip(backend.signal().to_samples()) {
                     *dst = src
                 }
                 portaudio::Continue
             };
             let stream = try!(pa.open_non_blocking_stream(settings, callback));
-            Ok(Driver{pa: pa, stream: stream})
+            Ok(Driver{pa: pa, stream: stream, base: base_time})
         }
 
         pub fn start(&mut self) -> Result<(), Box<Error>> {

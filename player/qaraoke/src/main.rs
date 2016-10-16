@@ -65,7 +65,7 @@ pub mod types {
         fn initialize(&mut self, context: &Rc<glium::backend::Context>);
         /// Render a frame. initialize will be called first.
         /// when is measured in milliseconds since the start of playback.
-        fn render_frame(&mut self, context: &Rc<glium::backend::Context>, target: &mut Surface, when: u32);
+        fn render_frame(&mut self, context: &Rc<glium::backend::Context>, target: &mut Surface, when: f64);
     }
 
     //#[derive(Clone)]
@@ -125,6 +125,9 @@ impl <R: std::io::Read, S: glium::Surface + 'static> KaraokeSource<R, S> {
         for stream in discard_streams {
             source.demux.ignore_stream(stream)
         }
+
+        // Get the first chunk of packets processed
+        try!(source.demux.pump_until(1000));
         Ok(source)
     }
 }
@@ -173,14 +176,14 @@ fn main() {
     
     loop {
         // Do updates
-        let time_ms = (ao_driver.timestamp() / 1000);
-        println!("At time {}", time_ms);
+        let time = ao_driver.timestamp();
+        println!("At time {}", time);
         if let Some(ref mut vcodec) = player.video {
             let mut target = display.draw();
-            vcodec.render_frame(display.get_context(), &mut target, time_ms as u32);
+            vcodec.render_frame(display.get_context(), &mut target, time);
             target.finish().unwrap();
         }
-        player.demux.pump_until(time_ms + 1000).unwrap();
+        player.demux.pump_until((time * 1000. + 1000.) as u64).unwrap();
         if let Some(ref mut acodec) = player.audio {
             acodec.do_needful()
         }
