@@ -11,7 +11,7 @@ extern crate ogk;
 extern crate portaudio;
 extern crate sample;
 extern crate crossbeam;
-extern crate libsoxr;
+extern crate soxr;
 
 // Import codecs
 pub mod rt;
@@ -26,7 +26,6 @@ use glium::backend::Facade;
 pub mod types {
     use glium;
     use std::rc::Rc;
-    use std::sync::mpsc;
     use rt::ringbuffer;
     
     pub type Sample = [f32; 2];
@@ -146,9 +145,7 @@ fn main() {
     let start_time = std::time::Instant::now();
 
     let mut ao_driver = ao::open().unwrap();
-    let mut driver_key = 0;
-
-    ao_driver.start();
+    ao_driver.start().unwrap();
     {
         // Set up a stream
         if let Some(ref mut vcodec) = player.video {
@@ -157,15 +154,16 @@ fn main() {
         if let Some(ref mut acodec) = player.audio {
             // We cheat here and always initialize ring buffers to half a
             // second.
-            let (rd, wr) = rt::ringbuffer::new(24000);
+            let (rd, wr) = rt::ringbuffer::new(96000);
             acodec.set_ringbuffer(wr);
-            ao_driver.change_stream(Some(rd));
+            acodec.do_needful();
+            ao_driver.change_stream(Some(rd)).unwrap();
         } else {
-            ao_driver.change_stream(None);
+            ao_driver.change_stream(None).unwrap();
         }
 
         ao_driver.zero_time().unwrap();
-        driver_key = ao_driver.commit().unwrap();
+        ao_driver.commit().unwrap();
     }
 
     // Wait for the driver to synchronize
@@ -175,15 +173,17 @@ fn main() {
     
     loop {
         // Do updates
-        let playtime = std::time::Instant::now().duration_since(start_time);
-        let time_ms = (playtime.as_secs() * 1000) as u32 + playtime.subsec_nanos() / 1000_000;
+        let time_ms = (ao_driver.timestamp() / 1000);
+        println!("At time {}", time_ms);
         if let Some(ref mut vcodec) = player.video {
             let mut target = display.draw();
-            vcodec.render_frame(display.get_context(), &mut target, time_ms);
+            vcodec.render_frame(display.get_context(), &mut target, time_ms as u32);
             target.finish().unwrap();
         }
-        player.demux.pump_until(time_ms as u64 * 1000 + 1000_000).unwrap();
-
+        player.demux.pump_until(time_ms + 1000).unwrap();
+        if let Some(ref mut acodec) = player.audio {
+            acodec.do_needful()
+        }
         // Handle events
         for ev in display.poll_events() {
             match ev {

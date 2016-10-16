@@ -1,25 +1,25 @@
 use ogk::ogg;
 use mpg123;
-use sample;
-use sample::signal::Signal;
 use types;
 use glium;
 use rt::ringbuffer;
-use std::thread;
 use std::sync::mpsc;
-use libsoxr;
+use std::vec;
+use std::os::raw as ostyp;
+use soxr;
 
 struct Mp3Decoder {
     queue_sender: mpsc::Sender<Vec<types::Sample>>,
     decoder: mpg123::Handle<f32>,
     sample_frequency: u64,
     aux_headers: usize,
-    soxr: libsoxr::Soxr,
+    soxr: soxr::Soxr<types::Sample, types::Sample>,
 }
 
 struct Mp3DecoderFrontend {
     receiver: mpsc::Receiver<Vec<types::Sample>>,
     ringbuffer: Option<ringbuffer::Writer<types::Sample>>,
+    queued_samples: Option<vec::IntoIter<types::Sample>>,
 }
 
 fn as_interlaced<T>(buf: &mut [[T; 2]]) -> &mut [T] {
@@ -29,19 +29,30 @@ fn as_interlaced<T>(buf: &mut [[T; 2]]) -> &mut [T] {
     }
 }
 
+fn as_mut_frames<T>(buf: &mut [T]) -> &mut [[T;2]] {
+    use std::slice;
+    unsafe {
+        slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut [T;2], buf.len() / 2)
+    }
+}
+
+fn as_frames<T>(buf: &[T]) -> &[[T;2]] {
+    use std::slice;
+    unsafe {
+        slice::from_raw_parts(buf.as_ptr() as *const [T;2], buf.len() / 2)
+    }
+}
+
+
 impl Mp3Decoder {
     fn handle_samples(&mut self, rate: f64, buf: &[f32]) {
         let mut obuf : Vec<[f32;2]> = vec![[0.0;2]; (buf.len() as f64 / 2. * 48000. / rate + 0.5) as usize];
-        self.soxr.set_io_ratio(rate / 48000., 0).unwrap();
+        self.soxr.change_rate(rate, 48000., 0).unwrap();
         // This function is deceptively unsafe; regardless of type
         // parameters, it will always use the types given in the initializer (f32/f32)
-        if let Ok((idone, odone)) = self.soxr.process::<f32,f32>(Some(buf), as_interlaced(&mut obuf[..])) {
-            if idone != buf.len() {
-                println!("soxr didn't consume entire input buffer");
-            }
-
-            obuf.truncate(odone);
-            self.queue_sender.send(obuf);
+        if let Ok(done) = self.soxr.process(Some(as_frames(buf)), &mut obuf[..]) {
+            obuf.truncate(done);
+            self.queue_sender.send(obuf).ok();
         } else {
             panic!("Soxr somehow failed");
         }
@@ -50,12 +61,12 @@ impl Mp3Decoder {
     fn handle_finish(&mut self) {
         loop {
             let mut obuf = vec![[0.;2]; 512];
-            if let Ok((idone, odone)) = self.soxr.process::<f32,f32>(None, as_interlaced(&mut obuf[..])) {
+            if let Ok(odone) = self.soxr.process(None, &mut obuf[..]) {
                 if odone == 0 {
                     break;
                 }
                 obuf.truncate(odone);
-                self.queue_sender.send(obuf);
+                self.queue_sender.send(obuf).ok();
             } else {
                 panic!("Soxr somehow failed");
             }
@@ -81,14 +92,13 @@ impl ogg::BitstreamDecoder for Mp3Decoder {
                 return last_granule+1;
             },
             Ok((rate, channels, nsamples)) => {
-                use sample::signal::Signal;
                 if nsamples > 0 {
                     if channels != 2 {
                         panic!("Output must be in stereo! Got {} channels", channels);
                     }
                     
                     //let mut obuf : Vec<f32> = vec![0.0; (2304. * 48000. / rate as f64 + 0.5) as usize];
-                    self.handle_samples(rate as f64, &buf[..])
+                    self.handle_samples(rate as f64, &buf[..]);
                 }
             },
         };
@@ -109,14 +119,43 @@ impl types::AudioCodec for Mp3DecoderFrontend {
     fn min_buffer_size(&self) -> u32 { 1152 }
 
     fn do_needful(&mut self) {
-        
+        if self.ringbuffer.is_none() {
+            return
+        }
+        let drop_ringbuffer;
+        {
+            let mut obuf = self.ringbuffer.as_mut().unwrap().extender();
+            
+            loop {
+                if let Some(mut it) = self.queued_samples.take() {
+                    obuf.extend(&mut it);
+                    if it.len() != 0 {
+                        // There's more there
+                        self.queued_samples = Some(it);
+                        return;
+                    }
+                }
+                match self.receiver.try_recv() {
+                    Ok(ibuf) => self.queued_samples = Some(ibuf.into_iter()),
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        drop_ringbuffer = true;
+                        break;
+                    },
+                    Err(mpsc::TryRecvError::Empty) => {
+                        drop_ringbuffer = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if drop_ringbuffer {
+            self.ringbuffer.take();
+        }
     }
 }
 
 pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg::BitstreamDecoder>, types::StreamDesc<S>)> {
     use byteorder::{ByteOrder, LittleEndian};
-    use libsoxr::datatype::Datatype as DT;
-    use libsoxr::spec;
     if &raw_header[0..9] != b"OggMP3\0\0\0" {
         return None;
     }
@@ -124,11 +163,13 @@ pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg
     let sample_freq = LittleEndian::read_u32(&raw_header[16..20]) as u64;
     let (sq_sender, sq_receiver) = mpsc::channel();
 
+    let soxr = soxr::SoxrBuilder::new()
+        .set_quality(soxr::sys::SOXR_HQ, soxr::sys::VR)
+        .build()
+        .unwrap();
+    
     let decoder = Box::new(Mp3Decoder{
-        soxr: libsoxr::Soxr::create(sample_freq as f64, 48000., 2,
-                                    Some(spec::IOSpec::new(DT::Float32I, DT::Float32I)),
-                                    Some(spec::QualitySpec::new(spec::QualityRecipe::VeryHigh, spec::QualityFlags::empty())),
-                                    None).unwrap(),
+        soxr: soxr,
         
         queue_sender: sq_sender,
         decoder: {
@@ -144,6 +185,7 @@ pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg
         Some(Box::new(Mp3DecoderFrontend{
             receiver: sq_receiver,
             ringbuffer: None,
+            queued_samples: None,
         }))
     );
 

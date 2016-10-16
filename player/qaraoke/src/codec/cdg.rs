@@ -128,13 +128,15 @@ impl CdgPlayer {
         while self.current_sector < target_sector {
             if let Some((ts, cmd)) = stream.queue.pop_front() {
                 if ts > target_sector {
+                    println!("Stopped processing because {} < {}", target_sector, ts);
                     stream.queue.push_front((ts, cmd));
-                    return;
+                    break;
                 }
                 self.interp.handle_cmd(cmd);
                 self.current_sector = ts;
             }
         }
+        println!("Updated to sector {} ({} commands in queue)", self.current_sector, stream.queue.len());
     }
 
     fn render(&mut self) {
@@ -196,7 +198,7 @@ impl ogg::BitstreamDecoder for CdgDecoder {
                         queue.queue.push_back( ((last_sector + cur_sector) as u32, cmd) );
                     }
                 }
-                println!("Processed sector; queue at {} commands", queue.queue.len());
+                println!("Processed sector {}; queue at {} commands", last_sector + cur_sector, queue.queue.len());
                 (last_sector + cur_sector) << 20 | (last_keyframe + cur_sector) & 0xFFFF
             },
             Some((PacketType::Keyframe, _)) => {

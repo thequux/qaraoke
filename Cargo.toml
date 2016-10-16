@@ -7,4 +7,6 @@ members = [
     "player/qaraoke",
     "player/mpg123-sys",
     "player/mpg123",
+    "player/soxr",
+    "player/soxr-sys",
 ]

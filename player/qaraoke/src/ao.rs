@@ -118,6 +118,7 @@ impl DriverBackend {
                 for dcmd in cmdlist.iter_mut() {
                     self.process_command(replace(dcmd, DriverCommand::Nop), time);
                 }
+                self.command_id = v;
             },
             DriverCommand::Abort => self.deferred_commands = Self::default_deferred_commands(),
             DriverCommand::Nop => (),
@@ -156,21 +157,33 @@ impl DriverBackend {
     fn signal(&mut self) -> DriverSignal {
         DriverSignal{
             iter: self.current_stream.as_mut().map(|s| s.iter()),
+            underrun_count: 0,
         }
     }
 }
 
 struct DriverSignal<'a> {
     iter: Option<rt::ringbuffer::ReadIter<'a, types::Sample>>,
+    underrun_count: usize,
 }
 
 impl <'a> Iterator for DriverSignal<'a> {
     type Item = types::Sample;
     fn next(&mut self) -> Option<types::Sample> {
-        Some(self.iter.as_mut().and_then(|i| i.next()).unwrap_or([0.0,0.0]))
+        Some(self.iter.as_mut().and_then(|i| i.next()).unwrap_or_else(|| {
+            self.underrun_count += 1;
+            [0.0,0.0]
+        }))
     }
 }
 
+impl <'a> Drop for DriverSignal<'a> {
+    fn drop(&mut self) {
+        if self.underrun_count != 0 && self.iter.is_some() {
+            println!("Dropped {} samples", self.underrun_count);
+        }
+    }
+}
 
 impl DriverFrontend {
     fn new(shared: Arc<AtomicOption<AoStatus>>, queue: rt::ringbuffer::Writer<DriverCommand>, hw: pa::Driver) -> Self {
@@ -229,8 +242,8 @@ impl DriverFrontend {
 pub fn open() -> Result<DriverFrontend, Box<Error>> {
     let status_chan = Arc::new(AtomicOption::new());
     let (cmd_rd, cmd_wt) = rt::ringbuffer::new(16);
-    let mut backend = DriverBackend::new(status_chan.clone(), cmd_rd);
-    let mut frontend = DriverFrontend::new(status_chan, cmd_wt, try!(pa::Driver::open(backend)));
+    let backend = DriverBackend::new(status_chan.clone(), cmd_rd);
+    let frontend = DriverFrontend::new(status_chan, cmd_wt, try!(pa::Driver::open(backend)));
 
     // Initialize PortAudio
     return Ok(frontend);
@@ -259,14 +272,12 @@ mod pa {
                 use sample::Signal;
                 backend.handle_commands(time.buffer_dac);
                 backend.set_time(time.current);
-
-                for (dst, src) in buffer.iter_mut().zip(backend.signal().to_samples()) { 
+                for (dst, src) in buffer.iter_mut().zip(backend.signal().to_samples()) {
                     *dst = src
                 }
-
                 portaudio::Continue
             };
-            let mut stream = try!(pa.open_non_blocking_stream(settings, callback));
+            let stream = try!(pa.open_non_blocking_stream(settings, callback));
             Ok(Driver{pa: pa, stream: stream})
         }
 

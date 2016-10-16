@@ -13,3 +13,5 @@ keywords = ["cdg", "karaoke"]
 cdg = { path = "../cdg", version= "0.1" }
 image = "0.10"
 
+[profile.dev]
+opt-level = 1
