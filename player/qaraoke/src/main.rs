@@ -18,6 +18,7 @@ pub mod rt;
 mod codec;
 mod ao;
 
+use std::rc::Rc;
 use std::error::Error;
 
 use glium::backend::Facade;
@@ -134,6 +135,33 @@ impl <R: std::io::Read, S: glium::Surface + 'static> KaraokeSource<R, S> {
 
 // TODO: Add glium_pib for bare metal Raspberry Pi support
 
+#[cfg(feature="raspberry_pi")]
+fn pib_open_display() -> Rc<glium::backend::Context> {
+    let system = glium_pib::System::new(Default::default());
+    let system = match system {
+        Ok(s) => s,
+        Err(_) => {
+            panic!("Failed to use broadcom libraries.");
+            return None;
+        }
+    };
+    let system = Arc::new(system);
+    let facade = glium_pib::create_window_facade(
+        &system,
+        &std::default::Default::default()
+    );
+    match facade {
+        Ok(f) => Some(f),
+        Err(_) => {
+            panic!("Failed to use broadcom libraries.");
+        },
+    }
+}
+
+#[cfg(not(feature="raspberry_pi"))]
+fn pib_open_display() -> Rc<glium::backend::Context> {
+    panic!("Unable to create window");
+}
 fn main() {
     use std::fs;
     let args: Vec<String> = std::env::args().collect();
@@ -141,7 +169,11 @@ fn main() {
     let mut player = KaraokeSource::from_stream(fs::File::open(filename).unwrap()).unwrap();
     use glium::DisplayBuild;
 
-    let display = glium::glutin::WindowBuilder::new().build_glium().unwrap();
+    let display = glium::glutin::WindowBuilder::new().build_glium();
+    let display: Rc<glium::backend::Context> = match display {
+        Ok(f) => f.get_context().clone(),
+        Err(_) => pib_open_display(),
+    };
 
     let mut frame_count = 0;
     let mut fps = fps_counter::FPSCounter::new();
@@ -177,9 +209,11 @@ fn main() {
     loop {
         // Do updates
         let time = ao_driver.timestamp();
-        println!("At time {}", time);
         if let Some(ref mut vcodec) = player.video {
-            let mut target = display.draw();
+            let mut target = glium::Frame::new(
+                display.clone(),
+                display.get_framebuffer_dimensions(),
+            );
             vcodec.render_frame(display.get_context(), &mut target, time);
             target.finish().unwrap();
         }
@@ -188,6 +222,7 @@ fn main() {
             acodec.do_needful()
         }
         // Handle events
+        /*
         for ev in display.poll_events() {
             match ev {
                 glium::glutin::Event::Closed => return,
@@ -199,5 +234,6 @@ fn main() {
         if frame_count % 100 == 0 {
             display.get_window().map(|win| win.set_title(&format!("{} fps", fps_c)));
         }
+        */
     }
 }

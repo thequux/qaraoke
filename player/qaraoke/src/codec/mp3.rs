@@ -164,7 +164,7 @@ pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg
     let (sq_sender, sq_receiver) = mpsc::channel();
 
     let soxr = soxr::SoxrBuilder::new()
-        .set_quality(soxr::sys::SOXR_HQ, soxr::sys::VR)
+        .set_quality(soxr::sys::SOXR_LQ, soxr::sys::VR)
         .build()
         .unwrap();
     

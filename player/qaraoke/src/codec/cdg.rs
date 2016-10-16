@@ -128,7 +128,6 @@ impl CdgPlayer {
         while self.current_sector < target_sector {
             if let Some((ts, cmd)) = stream.queue.pop_front() {
                 if ts > target_sector {
-                    println!("Stopped processing because {} < {}", target_sector, ts);
                     stream.queue.push_front((ts, cmd));
                     break;
                 }
@@ -136,7 +135,6 @@ impl CdgPlayer {
                 self.current_sector = ts;
             }
         }
-        println!("Updated to sector {} ({} commands in queue)", self.current_sector, stream.queue.len());
     }
 
     fn render(&mut self) {
