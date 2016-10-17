@@ -11,7 +11,7 @@ use soxr;
 struct Mp3Decoder {
     queue_sender: mpsc::Sender<Vec<types::Sample>>,
     decoder: mpg123::Handle<f32>,
-    sample_frequency: u64,
+    sample_frequency: u32,
     aux_headers: usize,
     soxr: soxr::Soxr<types::Sample, types::Sample>,
 }
@@ -45,9 +45,13 @@ fn as_frames<T>(buf: &[T]) -> &[[T;2]] {
 
 
 impl Mp3Decoder {
-    fn handle_samples(&mut self, rate: f64, buf: &[f32]) {
-        let mut obuf : Vec<[f32;2]> = vec![[0.0;2]; (buf.len() as f64 / 2. * 48000. / rate + 0.5) as usize];
-        self.soxr.change_rate(rate, 48000., 0).unwrap();
+    fn handle_samples(&mut self, rate: u32, buf: &[f32]) {
+        let mut obuf : Vec<[f32;2]> = vec![[0.0;2]; (buf.len() as f64 / 2. * 48000. / rate as f64 + 0.5) as usize];
+        //self.queue_sender.send(obuf);  return;
+        if rate != self.sample_frequency {
+            self.sample_frequency = rate;
+            self.soxr.change_rate(rate as f64, 48000., 0).unwrap();
+        }
         // This function is deceptively unsafe; regardless of type
         // parameters, it will always use the types given in the initializer (f32/f32)
         if let Ok(done) = self.soxr.process(Some(as_frames(buf)), &mut obuf[..]) {
@@ -75,7 +79,7 @@ impl Mp3Decoder {
 }
 
 impl ogg::BitstreamDecoder for Mp3Decoder {
-    fn map_granule(&self, timestamp: u64) -> u64 { 1000_000 * timestamp / self.sample_frequency }
+    fn map_granule(&self, timestamp: u64) -> u64 { 1000_000 * timestamp / self.sample_frequency as u64 }
     fn num_headers(&self) -> usize { self.aux_headers + 1 }
     fn process_header(&mut self, _: &[u8]) { }
     fn process_packet(&mut self, packet: &[u8], last_granule: u64) -> u64 {
@@ -98,7 +102,7 @@ impl ogg::BitstreamDecoder for Mp3Decoder {
                     }
                     
                     //let mut obuf : Vec<f32> = vec![0.0; (2304. * 48000. / rate as f64 + 0.5) as usize];
-                    self.handle_samples(rate as f64, &buf[..]);
+                    self.handle_samples(rate, &buf[..]);
                 }
             },
         };
@@ -160,11 +164,13 @@ pub fn try_start_stream<S: glium::Surface>(raw_header: &[u8]) -> Option<(Box<ogg
         return None;
     }
     let aux_headers = raw_header[11] as usize;
-    let sample_freq = LittleEndian::read_u32(&raw_header[16..20]) as u64;
+    let sample_freq = LittleEndian::read_u32(&raw_header[16..20]);
     let (sq_sender, sq_receiver) = mpsc::channel();
 
+    // I would like to pass VR as the only quality flag to neable
+    // variable sample rate changing. However, that slows resampling down significantly
     let soxr = soxr::SoxrBuilder::new()
-        .set_quality(soxr::sys::SOXR_LQ, soxr::sys::VR)
+        .set_quality(soxr::sys::SOXR_QQ, soxr::sys::soxr_quality_flags::empty())
         .build()
         .unwrap();
     
