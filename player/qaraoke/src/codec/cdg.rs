@@ -42,11 +42,9 @@ impl CdgPlayerRsrc {
         let indices = glium::index::NoIndices(glium::index::PrimitiveType::TriangleFan);
         
         let vertex_shader_src = r#"
-        #version 140
-
-        in vec2 position;
-        in vec2 tex_coords;
-        out vec2 v_tex_coords;
+        attribute vec2 position;
+        attribute vec2 tex_coords;
+        varying vec2 v_tex_coords;
 
         void main() {
             gl_Position = vec4(position, 0.0, 1.0);
@@ -55,15 +53,12 @@ impl CdgPlayerRsrc {
 "#;
 
         let fragment_shader_src = r#"
-        #version 140
-
-        in vec2 v_tex_coords;
-        out vec4 color;
+        varying vec2 v_tex_coords;
 
         uniform sampler2D tex;
 
         void main() {
-            color = texture(tex, v_tex_coords);
+            gl_FragColor = texture2D(tex, v_tex_coords);
         }
 "#;
 
