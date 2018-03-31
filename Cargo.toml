@@ -10,3 +10,6 @@ members = [
     "soxr",
     "soxr-sys",
 ]
+
+[profile.dev]
+opt-level = 1
