@@ -1,6 +1,6 @@
 [package]
 name = "cdg_renderer"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["TQ Hirsch <thequux@thequux.com>"]
 description = "CD+G renderer"
 repository = "https://github.com/thequux/qaraoke"
