@@ -227,8 +227,9 @@ impl CdgInterpreter {
      */
 }
 
-impl image::GenericImage for CdgInterpreter {
+impl image::GenericImageView for CdgInterpreter {
     type Pixel = image::Rgba<u8>;
+    type InnerImageView = Self;
 
     fn dimensions(&self) -> (u32,u32) {
         (300,216)
@@ -249,22 +250,10 @@ impl image::GenericImage for CdgInterpreter {
         }
     }
 
-    #[allow(unused_variables)]
-    fn get_pixel_mut(&mut self, x: u32, y: u32) -> &mut Self::Pixel {
-        unimplemented!();
-    }
-
-    #[allow(unused_variables)]
-    fn put_pixel(&mut self, x: u32, y: u32, pixel: Self::Pixel) {
-        unimplemented!();
-    }
-
-    #[allow(unused_variables)]
-    fn blend_pixel(&mut self, x: u32, y: u32, pixel: Self::Pixel) {
-        unimplemented!();
+    fn inner(&self) -> &Self::InnerImageView {
+        self
     }
 }
-
 
 impl CdgInterpreter {
     pub fn handle_cmd(&mut self, command: cdg::Command) {
