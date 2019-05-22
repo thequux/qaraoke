@@ -241,10 +241,10 @@ impl image::GenericImage for CdgInterpreter {
     fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
         use image::Pixel;
         let cindex = self.content[self.map_pxrow(y as usize)][self.map_pxcol(x as usize)];
+        let c = self.clut[cindex as usize];
         if self.transparent == cindex {
-            image::Rgba::from_channels(0,0,0,0)
+            image::Rgba::from_channels(c.r(), c.g(), c.b(), 0)
         } else {
-            let c = self.clut[cindex as usize];
             image::Rgba::from_channels(c.r(), c.g(), c.b(), 255)
         }
     }
