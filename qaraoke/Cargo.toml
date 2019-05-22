@@ -29,4 +29,4 @@ path = "../soxr"
 path = "../mpg123"
 
 [dependencies.ogk]
-path = "../../tools/ogk"
+path = "../ogk"

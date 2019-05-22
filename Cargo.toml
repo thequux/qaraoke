@@ -1,12 +1,15 @@
 [workspace]
 members = [
-    "tools/ogk-tool",
-    "tools/ogk",
-    "player/cdg",
-    "player/cdg_renderer",
-    "player/qaraoke",
-    "player/mpg123-sys",
-    "player/mpg123",
-    "player/soxr",
-    "player/soxr-sys",
+    "ogk-tool",
+    "ogk",
+    "cdg",
+    "cdg_renderer",
+    "qaraoke",
+    "mpg123-sys",
+    "mpg123",
+    "soxr",
+    "soxr-sys",
 ]
+
+[profile.dev]
+opt-level = 1
