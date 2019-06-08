@@ -1,6 +1,7 @@
 extern crate cdg;
 extern crate image;
 
+use cdg::RgbColor;
 use std::ops::{Index,IndexMut,Fn,Add};
 
 pub trait One {
@@ -103,31 +104,35 @@ impl <'b> IndexMut<(u8,u8)> for TileView<'b> {
     }
 }
 
+// Default to CGA-ish palette
+fn default_colors() -> [RgbColor; 16] {
+    [
+        RgbColor::from_rgb(0, 0, 0),
+        RgbColor::from_rgb(0, 0, 170),
+        RgbColor::from_rgb(0, 170, 0),
+        RgbColor::from_rgb(0, 170, 170),
+        RgbColor::from_rgb(170, 0, 0),
+        RgbColor::from_rgb(170, 0, 170),
+        RgbColor::from_rgb(170, 170, 0),
+        RgbColor::from_rgb(170, 170, 170),
+        RgbColor::from_rgb(85, 85, 85),
+        RgbColor::from_rgb(85, 85, 255),
+        RgbColor::from_rgb(85, 255, 85),
+        RgbColor::from_rgb(85, 255, 255),
+        RgbColor::from_rgb(255, 85, 85),
+        RgbColor::from_rgb(255, 85, 255),
+        RgbColor::from_rgb(255, 255, 85),
+        RgbColor::from_rgb(255, 255, 255),
+    ]
+}
 
 /// Basic accessors, constructors
 impl CdgInterpreter {
     pub fn new() -> Self {
-        use cdg::RgbColor;
         CdgInterpreter {
             tile_shift: Position::new(0,0),
             pixel_shift: Position::new(0,0),
-            // Default to CGA-ish palette
-            clut: [RgbColor::from_rgb(0,0,0),
-                   RgbColor::from_rgb(0,0,170),
-                   RgbColor::from_rgb(0,170,0),
-                   RgbColor::from_rgb(0,170,170),
-                   RgbColor::from_rgb(170,0,0),
-                   RgbColor::from_rgb(170,0,170),
-                   RgbColor::from_rgb(170,170,0),
-                   RgbColor::from_rgb(170,170,170),
-                   RgbColor::from_rgb(85,85,85),
-                   RgbColor::from_rgb(85,85,255),
-                   RgbColor::from_rgb(85,255,85),
-                   RgbColor::from_rgb(85,255,255),
-                   RgbColor::from_rgb(255,85,85),
-                   RgbColor::from_rgb(255,85,255),
-                   RgbColor::from_rgb(255,255,85),
-                   RgbColor::from_rgb(255,255,255)],
+            clut: default_colors(),
             dirty: Some(Rectangle::new(Position::new(0,0),
                                        Position::new(50,18))),
             content: [[0;300];216],
@@ -212,6 +217,21 @@ impl CdgInterpreter {
     /// Mark the entire region clean
     pub fn clear_dirty_region(&mut self) {
         self.dirty = None;
+    }
+
+    // Can be used by decoder when seeking for example
+    pub fn reset(&mut self, reset_color: bool) {
+        self.tile_shift = Position::new(0,0);
+        self.pixel_shift = Position::new(0,0);
+        self.dirty = Some(Rectangle::new(Position::new(0,0),
+                                       Position::new(50,18)));
+        self.content = [[0;300];216];
+        self.border = 0;
+        self.transparent = 255;
+
+        if reset_color {
+            self.clut = default_colors();
+        }
     }
 
     /*
