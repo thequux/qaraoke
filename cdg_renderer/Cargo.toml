@@ -11,4 +11,4 @@ keywords = ["cdg", "karaoke"]
 
 [dependencies]
 cdg = { path = "../cdg", version= "0.1" }
-image = "0.21"
+image = "0.22"
